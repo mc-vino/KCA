@@ -99,6 +99,8 @@ details.catdoc[open]>summary::before{content:'\25BE'}
 .doctbl table{margin-top:0}
 tr.rowerr td{background:var(--redbg)}
 tr.rowcorr td{background:var(--limebg)}
+.ladsub{margin-top:12px}
+.ladh{font:600 12px/1.4 var(--body);color:var(--ink);margin:9px 0 5px}
 </style>
 </head>
 <body>
@@ -323,6 +325,7 @@ function analyze(){
   const norm=$("#norm").value===""?0:+$("#norm").value;
   const R={cash,nTx:txns.length,findings:[],opening,norm,hasPko:pko.length>0,closingStated};
   let sumD=0,sumC=0;txns.forEach(t=>{sumD+=t.debCash;sumC+=t.credCash;});
+  let othDeb=0,othCred=0;txns.forEach(t=>{if(t.debCash>0&&!(sale.has(t.counter)||adv.has(t.counter)))othDeb+=t.debCash;if(t.credCash!==0&&!dep.has(t.counter)&&!ref.has(t.counter))othCred+=t.credCash;});R.procheeNet=r2(othDeb-othCred);
   R.sumD=r2(sumD);R.sumC=r2(sumC);R.closing=r2(opening+sumD-sumC);R.deviation=r2(R.closing-norm);
   R.period=[txns[0].date,txns[txns.length-1].date];const Delta=R.deviation;
   // целостность остатка
@@ -351,7 +354,7 @@ function analyze(){
   pko.forEach(u=>{if(u.date&&!inP(u.date))return;const k=dk(u.date||END);opIn[k]=(opIn[k]||0)+u.amt;});
   R.recDep=reconcile(accDep,r2(tDep),opDep,"dep",rkoRel,START,END);
   R.recRef=reconcile(accRef,r2(tRef),opRef,"ref",rkoRel,START,END);
-  R.recIn=pko.length?reconcile(accIn,r2(tIn),opIn,"in",pkoRel,START,END):null;
+  R.recIn=pko.length?reconcile(accIn,r2(Object.values(accIn).reduce((s,v)=>s+v,0)),opIn,"in",pkoRel,START,END):null;
   // документы категории за день
   const docsOn=(kd,kind)=>txns.filter(t=>dk(t.date)===kd&&((kind==="dep"&&t.credCash>0&&dep.has(t.counter))||(kind==="ref"&&t.credCash>0&&ref.has(t.counter))||(kind==="in"&&t.debCash>0&&(sale.has(t.counter)||adv.has(t.counter))))).map(t=>({row:t.row,counter:t.counter,doc:t.docnum,time:t.time,amt:(t.credCash||t.debCash)}));
   // находки из сверки
@@ -395,9 +398,11 @@ function analyze(){
   if(pko.length&&pkoRel){const days=[...new Set([...Object.keys(accIn),...Object.keys(opIn)])].sort();const series=days.map(d=>r2((accIn[d]||0)-(opIn[d]||0)));const mu=median(series),sig=madSigma(series)||1;const cp=cusum(series,mu,sig).map(s=>days[s.i]);const mz=modZ(series);const out=days.filter((d,i)=>Math.abs(mz[i])>K.MODZ);R.diag.cusum=[...new Set(cp)].map(druK);R.diag.modz=out.map(druK);}
   // раскладка
   const contrib=[];if(R.recDep)contrib.push({name:"Инкассация",net:R.recDep.net,c:-R.recDep.net,cls:R.recDep.cls});if(R.recRef)contrib.push({name:"Возвраты",net:R.recRef.net,c:-R.recRef.net,cls:R.recRef.cls});if(R.recIn)contrib.push({name:"Приход",net:R.recIn.net,c:+R.recIn.net,cls:R.recIn.cls});
+  if(Math.abs(R.procheeNet)>=K.EPS_FLOOR)contrib.push({name:"Размен / реверс / прочее",net:null,c:R.procheeNet,cls:"other"});
   R.contrib=contrib;const sumC2=r2(contrib.reduce((s,x)=>s+x.c,0));R.residual=r2(R.deviation-sumC2);
   R.explained=r2(R.findings.filter(f=>(f.sev==="proven")&&f.amount!=null).reduce((s,f)=>s+f.amount,0));
-  R.fullyTied=R.hasPko&&contrib.every(x=>x.cls!=="distributed"&&x.cls!=="totals_only")&&Math.abs(R.residual)<2;
+  R.tied=Math.abs(R.residual)<2;
+  R.localized=[R.recDep,R.recRef,R.recIn].filter(Boolean).every(r=>r.cls==="match"||r.cls==="discrete");
   const rank={proven:0,corrected:1,likely:2,zone:3,fact:4};
   R.findings.sort((a,b)=>(rank[a.sev]-rank[b.sev])||(Math.abs(b.amount||0)-Math.abs(a.amount||0)));
   // детализация по документам для раскладки
@@ -405,10 +410,24 @@ function analyze(){
   const corrRows=new Set();pairs.forEach(p=>{corrRows.add(p.orig.row);corrRows.add(p.corr.row);});
   R.catDocs={dep:[],ref:[],in:[],other:[]};
   txns.forEach(t=>{const rec={row:t.row,date:t.date,docnum:t.docnum,type:t.docType,counter:t.counter,amt:r2(t.debCash||t.credCash),flag:flagged.has(t.row)?"err":(corrRows.has(t.row)?"corr":"")};
-    if(t.debCash>0)R.catDocs.in.push(rec);
+    if(t.debCash>0&&(sale.has(t.counter)||adv.has(t.counter)))R.catDocs.in.push(rec);
     else if(t.credCash!==0&&dep.has(t.counter))R.catDocs.dep.push(rec);
     else if(t.credCash!==0&&ref.has(t.counter))R.catDocs.ref.push(rec);
     else R.catDocs.other.push(rec);});
+  // дневная лестница расхождений (теория поэтапной сверки)
+  const byDay=(arr,d)=>arr.filter(x=>dk(x.date)===d);
+  R.ladders={};
+  [["dep",accDep,opDep,R.catDocs.dep],["ref",accRef,opRef,R.catDocs.ref],["in",accIn,opIn,R.catDocs.in]].forEach(([key,acc,op,docs])=>{
+    if(key==="in"&&!pko.length){R.ladders[key]=null;return;}
+    const dys=[...new Set([...Object.keys(acc),...Object.keys(op)])].sort();let cum=0;const out=[];
+    dys.forEach(d=>{const o=r2(acc[d]||0),b=r2(op[d]||0),diff=r2(o-b);cum=r2(cum+diff);
+      if(Math.abs(diff)>=K.EPS_FLOOR){const dd=byDay(docs,d);const isRound=Math.abs(diff-Math.round(diff))<0.005&&Math.abs(diff)<100;
+        let tag,sev;
+        if(dd.length===1){tag="R"+dd[0].row+" "+(diff<0?"занижен":"завышен")+" на "+fmt(Math.abs(diff));sev=isRound?"round":"doc";}
+        else if(isRound){tag="вероятно округление смены";sev="round";}
+        else{tag="агрегат "+(diff<0?"занижен":"завышен")+" — проверить Z-отчёт";sev="agg";}
+        out.push({date:d,oneC:o,buh:b,diff,cum,docs:dd,tag,sev});}});
+    R.ladders[key]=out;});
   return R;
 }
 
@@ -435,11 +454,18 @@ function renderReport(R){
     const col=rec.cls==="match"?"tgrn":rec.cls==="discrete"?"tred":"tamb";
     return "<tr><td>"+name+"</td><td class='r'>"+fmt(rec.accTotal)+"</td><td class='r'>"+fmt(rec.opTotal)+"</td><td class='r "+(rec.net?col:"")+"'>"+(rec.net?sgn(rec.net):"0,00")+"</td><td class='r'>"+(rec.ratio||"—")+"</td><td class='"+col+"'>"+clsTxt+"</td></tr>";};
   const recCard="<div class='card fact span2'><div class='ch'><span class='ct'>Сверка с операционными данными</span><span class='sev fact'>Факт</span></div><table class='minitable'><tr><th>Категория</th><th class='r'>1С</th><th class='r'>Факт</th><th class='r'>Нетто</th><th class='r'>нетто/брутто</th><th>Статус</th></tr>"+recRow("Инкассация",R.recDep)+recRow("Возвраты",R.recRef)+recRow("Приход",R.recIn)+"</table><div class='desc'>«Совпадает» — ошибок нет. «Ошибка» — локализовано до дня/документа. «Распределено» (нетто/брутто < "+K.RATIO+") — пакет/тайминг, не дискретная ошибка. «По итогу» — дневная сверка невозможна (даты недостоверны).</div></div>";
-  const dr=R.contrib.map(x=>"<tr><td>"+x.name+"</td><td class='r'>"+(x.net?sgn(x.net):"0,00")+"</td><td class='r "+(x.c<0?"tred":x.c>0?"tamb":"")+"'>"+(x.c?sgn(x.c):"0,00")+"</td><td>"+({match:"верно",discrete:"ошибка",distributed:"распределено",totals_only:"по итогу"}[x.cls])+"</td></tr>").join("");
+  const dr=R.contrib.map(x=>"<tr><td>"+x.name+"</td><td class='r'>"+(x.net!=null?sgn(x.net):"—")+"</td><td class='r "+(x.c<0?"tred":x.c>0?"tamb":"")+"'>"+(x.c?sgn(x.c):"0,00")+"</td><td>"+({match:"верно",discrete:"ошибка",distributed:"распределено",totals_only:"по итогу",other:"реверс/размен"}[x.cls])+"</td></tr>").join("");
   const docTbl=arr=>{if(!arr.length)return "<div class='muted' style='padding:6px 2px'>нет документов</div>";const s=[...arr].sort((a,b)=>(a.date-b.date)||(a.row-b.row));return "<div class='doctbl'><table class='minitable'><tr><th>R#</th><th>Дата</th><th>Тип</th><th>№</th><th>Корр-счёт</th><th class='r'>Сумма</th></tr>"+s.map(d=>"<tr class='"+(d.flag==="err"?"rowerr":d.flag==="corr"?"rowcorr":"")+"'><td>"+d.row+"</td><td>"+dru(d.date)+"</td><td>"+d.type+"</td><td>"+(d.docnum||"")+"</td><td>"+(d.counter||"")+"</td><td class='r'>"+fmt(d.amt)+"</td></tr>").join("")+"</table></div>";};
   const catBlock=(name,arr,note)=>{if(!arr.length)return "";const sum=r2(arr.reduce((s,d)=>s+d.amt,0));return "<details class='catdoc'><summary>"+name+" · "+arr.length+" док. · Σ "+fmt(sum)+(note?" <span class='muted'>"+note+"</span>":"")+"</summary>"+docTbl(arr)+"</details>";};
   const docDetail="<div class='docdetail'><div class='dd-h'>Детализация по документам · <span class='muted'>красным — ошибочные, зелёным — сторно</span></div>"+catBlock("Инкассация",R.catDocs.dep)+catBlock("Возвраты",R.catDocs.ref,"вкл. сторно")+catBlock("Приход",R.catDocs.in)+catBlock("Размен / прочее",R.catDocs.other)+"</div>";
-  const decomp="<div class='card "+(R.fullyTied?"fact":"zone")+" span2'><div class='ch'><span class='ct'>Раскладка отклонения</span><span class='sev "+(R.fullyTied?"fact":"zone")+"'>"+(R.fullyTied?"Сходится точно":"Частично")+"</span></div><table class='minitable'><tr><th>Категория</th><th class='r'>Нетто (1С−факт)</th><th class='r'>Вклад в остаток</th><th>Статус</th></tr>"+dr+"<tr><td>Размен/прочее"+(R.hasPko?"":" + неверифиц. приход")+"</td><td class='r'>—</td><td class='r'>"+sgn(R.residual)+"</td><td>"+(R.hasPko?"остаток":"зона")+"</td></tr><tr><td><b>Итого = отклонение</b></td><td class='r'></td><td class='r tred'><b>"+sgn(dev)+"</b></td><td></td></tr></table><div class='desc'>"+(R.fullyTied?"Оба блока (РКО+ПКО) есть и сходятся — отклонение разложено до документа.":"Доказанные ошибки объясняют "+sgn(R.explained)+". Остальное — зона проверки (без ПКО приход не верифицируется, либо распределённый тайминг).")+"</div>"+docDetail+"</div>";
+  const decCls=R.tied?"fact":"zone";
+  const decLabel=R.tied?(R.localized?"Сходится точно":"Сходится · часть тайминг"):"Частично";
+  const decDesc=R.tied?(R.localized?"Отклонение полностью разложено по категориям и документам.":"Отклонение сходится численно — остаток разнесён. Часть категорий — распределённый тайминг/пакетное проведение, к одному документу не привязывается; детали в дневной лестнице ниже."):("Доказанные ошибки объясняют "+sgn(R.explained)+". Остаток "+sgn(R.residual)+" — зона проверки"+(R.hasPko?"":" (приход без ПКО не верифицируется)")+".");
+  const decomp="<div class='card "+decCls+" span2'><div class='ch'><span class='ct'>Раскладка отклонения</span><span class='sev "+decCls+"'>"+decLabel+"</span></div><table class='minitable'><tr><th>Категория</th><th class='r'>Нетто (1С−факт)</th><th class='r'>Вклад в остаток</th><th>Статус</th></tr>"+dr+(Math.abs(R.residual)>=2?"<tr><td>Не разнесено"+(R.hasPko?"":" (приход без ПКО)")+"</td><td class='r'>—</td><td class='r'>"+sgn(R.residual)+"</td><td>зона</td></tr>":"")+"<tr><td><b>Итого = отклонение</b></td><td class='r'></td><td class='r tred'><b>"+sgn(dev)+"</b></td><td></td></tr></table><div class='desc'>"+decDesc+"</div>"+docDetail+"</div>";
+  const ladTbl=arr=>"<table class='minitable'><tr><th>Дата</th><th class='r'>1С</th><th class='r'>Бух</th><th class='r'>Разн.</th><th class='r'>Кумул.</th><th>Документы / диагноз</th></tr>"+arr.map(x=>{const dl=x.docs.map(d=>"R"+d.row+(d.counter?" "+d.counter:"")).join(", ");const tc=x.sev==="round"?"tamb":"tred";return "<tr><td>"+druK(x.date)+"</td><td class='r'>"+fmt(x.oneC)+"</td><td class='r'>"+fmt(x.buh)+"</td><td class='r "+(x.diff<0?"tred":"tamb")+"'>"+sgn(x.diff)+"</td><td class='r'>"+sgn(x.cum)+"</td><td><span class='"+tc+"'>"+x.tag+"</span>"+(dl?" <span class='muted'>· "+dl+"</span>":"")+"</td></tr>";}).join("")+"</table>";
+  const L=R.ladders||{};const ladBlocks=[];
+  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{const a=L[p[1]];if(a&&a.length)ladBlocks.push("<div class='ladsub'><div class='ladh'>"+p[0]+" · расхождений: "+a.length+"</div>"+ladTbl(a)+"</div>");});
+  const ladderCard=ladBlocks.length?"<div class='card steel span2'><div class='ch'><span class='ct'>Дневная лестница расхождений 1С ↔ бух</span><span class='sev zone'>Поэтапно</span></div><div class='desc'>Каждый день, где суммы 1С и операционного блока расходятся, с нарастающим итогом. Одна проводка за день → локализовано до документа; агрегат (Z-отчёт продаж) → до дня. Жёлтым — мелкие круглые суммы (&lt;100, без копеек), обычно округление/недостача смены; красным — расхождения для разбора.</div>"+ladBlocks.join("")+"</div>":"";
   // диагностика
   let diagCard="";
   const dParts=[];
@@ -459,7 +485,7 @@ function renderReport(R){
 
   $("#results").innerHTML=
     "<div class='readout reveal'><div class='scan'></div><div class='lbl'>Отклонение остатка · касса "+R.cash+" · норма "+fmt(R.norm)+"</div><div class='figure fig-"+sign+"'><span class='lamp' style='color:"+lampC+"'></span><span>"+(sign==="zero"?"0,00":sgn(dev))+"</span><span class='ccy'>BYN</span></div><div class='verdict'>"+verdict+"</div></div>"+
-    "<div class='sec-h'>Находки · по достоверности</div><div class='bento'>"+(cards.join("")||"<div class='card fact span2'><div class='desc'>Дискретных ошибок не обнаружено.</div></div>")+recCard+decomp+diagCard+factCard+"</div>"+
+    "<div class='sec-h'>Находки · по достоверности</div><div class='bento'>"+(cards.join("")||"<div class='card fact span2'><div class='desc'>Дискретных ошибок не обнаружено.</div></div>")+recCard+decomp+ladderCard+diagCard+factCard+"</div>"+
     "<div class='btnrow'><button class='btn' id='xlsx'>Скачать Excel-отчёт</button><button class='btn ghost' id='prnt'>Печать / PDF</button></div>";
   $("#xlsx").onclick=()=>buildExcel(R);$("#prnt").onclick=()=>window.print();
   $("#results").scrollIntoView({behavior:"smooth",block:"start"});
@@ -486,6 +512,9 @@ function buildExcel(R){
   const pushCat=(cat,arr)=>(arr||[]).slice().sort((a,b)=>(a.date-b.date)||(a.row-b.row)).forEach(d=>dd2.push([cat,d.row,dru(d.date),d.type,d.docnum||"",d.counter||"",d.amt,d.flag==="err"?"ошибка":d.flag==="corr"?"сторно":""]));
   pushCat("Инкассация",R.catDocs.dep);pushCat("Возвраты",R.catDocs.ref);pushCat("Приход",R.catDocs.in);pushCat("Размен/прочее",R.catDocs.other);
   XLSX.utils.book_append_sheet(wb,aoa(dd2,[15,7,12,18,9,12,14,10]),"Документы");
+  const lad=[["Категория","Дата","1С","Бух","Разница","Кумулятив","Документы","Диагноз"]];
+  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{((R.ladders&&R.ladders[p[1]])||[]).forEach(x=>lad.push([p[0],druK(x.date),x.oneC,x.buh,x.diff,x.cum,x.docs.map(d=>"R"+d.row).join(" "),x.tag]));});
+  if(lad.length>1)XLSX.utils.book_append_sheet(wb,aoa(lad,[14,12,14,14,11,12,18,38]),"Лестница");
   XLSX.writeFile(wb,"Касса_"+R.cash+"_анализ.xlsx");
 }
 
