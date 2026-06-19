@@ -178,7 +178,7 @@ tr.rowcorr td{background:var(--limebg)}
 "use strict";
 const $=s=>document.querySelector(s);
 /* ====== пороги из методологии ====== */
-const K={EPS_FLOOR:1.00,EPS_SUM:0.50,DATE_WIN:3,MIN_ABS:50,RATIO:0.30,CONC:0.50,MODAL_BAD:0.50,MIN_DAYS:5,MODZ:3.5,IQR_SOFT:1.5,IQR_EXT:3.0,CUSUM_K:0.5,CUSUM_H:5,EWMA_L:0.2,EWMA_K:3,LEV:0.80};
+const K={EPS_FLOOR:1.00,EPS_SUM:0.50,DATE_WIN:3,LONG_WIN:31,MIN_ABS:50,RATIO:0.30,CONC:0.50,MODAL_BAD:0.50,MIN_DAYS:5,MODZ:3.5,IQR_SOFT:1.5,IQR_EXT:3.0,CUSUM_K:0.5,CUSUM_H:5,EWMA_L:0.2,EWMA_K:3,LEV:0.80};
 let WB=null,ROWS=[],NCOLS=0;
 const COL=i=>{let s="";i++;while(i>0){let m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=(i-(m+1))/26;}return s;};
 const colSel=["m_date","m_doc","m_dacc","m_damt","m_cacc","m_camt","m_bal","m_side","r_date","r_amt","r_to","p_date","p_amt","p_from"];
@@ -207,6 +207,18 @@ function modZ(vals){const med=median(vals);const mad=median(vals.map(v=>Math.abs
 function madSigma(vals){const med=median(vals);const mad=median(vals.map(v=>Math.abs(v-med)));return 1.4826*mad;}
 function subsetSum(cents,target){target=Math.round(target);if(target<=0)return null;const reach=new Map();reach.set(0,null);for(const a of cents){const keys=[...reach.keys()].sort((x,y)=>y-x);for(const s of keys){const ns=s+a;if(ns<=target&&!reach.has(ns))reach.set(ns,[s,a]);}}if(!reach.has(target))return null;const out=[];let cur=target;while(cur&&reach.get(cur)){const[p,a]=reach.get(cur);out.push(a);cur=p;}return out;}
 function cusum(series,mu,sigma){const Kk=K.CUSUM_K*sigma,H=K.CUSUM_H*sigma;let hi=0,lo=0;const sig=[];series.forEach((x,i)=>{hi=Math.max(0,hi+x-mu-Kk);lo=Math.max(0,lo+mu-Kk-x);if(hi>H||lo>H)sig.push({i,type:hi>H?"up":"down"});});return sig;}
+function collapseTiming(diffs,W){
+  const n=diffs.length;const used=new Array(n).fill(false);let redated=0;
+  let c=0,last=-1;for(let k=0;k<n;k++){c=r2(c+diffs[k][1]);if(Math.abs(c)<K.EPS_FLOOR){for(let t=last+1;t<=k;t++)used[t]=true;last=k;}}
+  const rem=[];for(let k=0;k<n;k++)if(!used[k])rem.push(k);rem.sort((a,b)=>Math.abs(diffs[b][1])-Math.abs(diffs[a][1]));
+  for(const k of rem){if(used[k])continue;const dt=kToDate(diffs[k][0]);for(let j=0;j<n;j++){if(used[j]||j===k)continue;if(Math.abs((kToDate(diffs[j][0])-dt)/864e5)<=W&&Math.abs(diffs[k][1]+diffs[j][1])<K.EPS_SUM){used[k]=used[j]=true;break;}}}
+  // pass3: совпадающая сумма с противоположным знаком на разных датах в пределах LONG_WIN (та же операция, перенесённая по дате)
+  const rem2=[];for(let k=0;k<n;k++)if(!used[k])rem2.push(k);rem2.sort((a,b)=>Math.abs(diffs[b][1])-Math.abs(diffs[a][1]));
+  for(const k of rem2){if(used[k])continue;const dt=kToDate(diffs[k][0]);let bj=-1,bd=1e9;for(let j=0;j<n;j++){if(used[j]||j===k)continue;const dd=Math.abs((kToDate(diffs[j][0])-dt)/864e5);if(dd<=K.LONG_WIN&&Math.abs(diffs[k][1]+diffs[j][1])<0.005&&dd<bd){bd=dd;bj=j;}}if(bj>=0){used[k]=used[bj]=true;redated+=2;}}
+  const residual=[];for(let k=0;k<n;k++)if(!used[k])residual.push(diffs[k]);
+  return {residual,collapsed:n-residual.length,redated,total:n};
+}
+function lagScore(acc,op,maxLag){const days=[...new Set([...Object.keys(acc),...Object.keys(op)])].sort();let best=0,bestMM=Infinity;const sc={};for(let lag=0;lag<=maxLag;lag++){let mm=0;for(const d of days){const dt=kToDate(d);const sh=dk(new Date(dt.getTime()-lag*864e5));mm+=Math.abs((acc[d]||0)-(op[sh]||0));}sc[lag]=r2(mm);if(mm<bestMM-0.01){bestMM=mm;best=lag;}}return {best,sc};}
 function lev(a,b){a=String(a||"");b=String(b||"");const m=a.length,n=b.length;if(!m)return n;if(!n)return m;let prev=Array.from({length:n+1},(_,j)=>j),cur=new Array(n+1);for(let i=1;i<=m;i++){cur[0]=i;for(let j=1;j<=n;j++){cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));}[prev,cur]=[cur,prev];}return prev[n];}
 function levSim(a,b){const L=Math.max(String(a||"").length,String(b||"").length);return L?1-lev(a,b)/L:1;}
 
@@ -414,20 +426,21 @@ function analyze(){
     else if(t.credCash!==0&&dep.has(t.counter))R.catDocs.dep.push(rec);
     else if(t.credCash!==0&&ref.has(t.counter))R.catDocs.ref.push(rec);
     else R.catDocs.other.push(rec);});
-  // дневная лестница расхождений (теория поэтапной сверки)
+  // дневная лестница расхождений со сворачиванием тайминга (сдвиг ±дн + агрегация)
   const byDay=(arr,d)=>arr.filter(x=>dk(x.date)===d);
-  R.ladders={};
-  [["dep",accDep,opDep,R.catDocs.dep],["ref",accRef,opRef,R.catDocs.ref],["in",accIn,opIn,R.catDocs.in]].forEach(([key,acc,op,docs])=>{
+  R.ladders={};R.diag=R.diag||{};R.diag.lag={};const WIN=K.DATE_WIN;
+  [["dep",accDep,opDep,R.catDocs.dep,R.recDep],["ref",accRef,opRef,R.catDocs.ref,R.recRef],["in",accIn,opIn,R.catDocs.in,R.recIn]].forEach(a=>{
+    const key=a[0],acc=a[1],op=a[2],docs=a[3],rec=a[4];
     if(key==="in"&&!pko.length){R.ladders[key]=null;return;}
-    const dys=[...new Set([...Object.keys(acc),...Object.keys(op)])].sort();let cum=0;const out=[];
-    dys.forEach(d=>{const o=r2(acc[d]||0),b=r2(op[d]||0),diff=r2(o-b);cum=r2(cum+diff);
-      if(Math.abs(diff)>=K.EPS_FLOOR){const dd=byDay(docs,d);const isRound=Math.abs(diff-Math.round(diff))<0.005&&Math.abs(diff)<100;
-        let tag,sev;
-        if(dd.length===1){tag="R"+dd[0].row+" "+(diff<0?"занижен":"завышен")+" на "+fmt(Math.abs(diff));sev=isRound?"round":"doc";}
-        else if(isRound){tag="вероятно округление смены";sev="round";}
-        else{tag="агрегат "+(diff<0?"занижен":"завышен")+" — проверить Z-отчёт";sev="agg";}
-        out.push({date:d,oneC:o,buh:b,diff,cum,docs:dd,tag,sev});}});
-    R.ladders[key]=out;});
+    const dys=[...new Set([...Object.keys(acc),...Object.keys(op)])].sort();
+    const raw=[];dys.forEach(d=>{const di=r2((acc[d]||0)-(op[d]||0));if(Math.abs(di)>=K.EPS_FLOOR)raw.push([d,di]);});
+    const col=collapseTiming(raw,WIN);R.diag.lag[key]=lagScore(acc,op,3);
+    const residual=col.residual.map(p=>{const d=p[0],di=p[1],dd=byDay(docs,d);const isRound=Math.abs(di-Math.round(di))<0.005&&Math.abs(di)<100;let tag,sev;
+      if(dd.length===1){tag="R"+dd[0].row+" "+(di<0?"занижен":"завышен")+" на "+fmt(Math.abs(di));sev=isRound?"round":"doc";}
+      else if(isRound){tag="вероятно округление смены";sev="round";}
+      else{tag="агрегат "+(di<0?"занижен":"завышен")+" — проверить Z-отчёт";sev="agg";}
+      return {date:d,diff:di,docs:dd,tag,sev};});
+    R.ladders[key]={residual,collapsed:col.collapsed,redated:col.redated,total:col.total,cls:rec?rec.cls:null,net:rec?rec.net:null};});
   return R;
 }
 
@@ -462,10 +475,13 @@ function renderReport(R){
   const decLabel=R.tied?(R.localized?"Сходится точно":"Сходится · часть тайминг"):"Частично";
   const decDesc=R.tied?(R.localized?"Отклонение полностью разложено по категориям и документам.":"Отклонение сходится численно — остаток разнесён. Часть категорий — распределённый тайминг/пакетное проведение, к одному документу не привязывается; детали в дневной лестнице ниже."):("Доказанные ошибки объясняют "+sgn(R.explained)+". Остаток "+sgn(R.residual)+" — зона проверки"+(R.hasPko?"":" (приход без ПКО не верифицируется)")+".");
   const decomp="<div class='card "+decCls+" span2'><div class='ch'><span class='ct'>Раскладка отклонения</span><span class='sev "+decCls+"'>"+decLabel+"</span></div><table class='minitable'><tr><th>Категория</th><th class='r'>Нетто (1С−факт)</th><th class='r'>Вклад в остаток</th><th>Статус</th></tr>"+dr+(Math.abs(R.residual)>=2?"<tr><td>Не разнесено"+(R.hasPko?"":" (приход без ПКО)")+"</td><td class='r'>—</td><td class='r'>"+sgn(R.residual)+"</td><td>зона</td></tr>":"")+"<tr><td><b>Итого = отклонение</b></td><td class='r'></td><td class='r tred'><b>"+sgn(dev)+"</b></td><td></td></tr></table><div class='desc'>"+decDesc+"</div>"+docDetail+"</div>";
-  const ladTbl=arr=>"<table class='minitable'><tr><th>Дата</th><th class='r'>1С</th><th class='r'>Бух</th><th class='r'>Разн.</th><th class='r'>Кумул.</th><th>Документы / диагноз</th></tr>"+arr.map(x=>{const dl=x.docs.map(d=>"R"+d.row+(d.counter?" "+d.counter:"")).join(", ");const tc=x.sev==="round"?"tamb":"tred";return "<tr><td>"+druK(x.date)+"</td><td class='r'>"+fmt(x.oneC)+"</td><td class='r'>"+fmt(x.buh)+"</td><td class='r "+(x.diff<0?"tred":"tamb")+"'>"+sgn(x.diff)+"</td><td class='r'>"+sgn(x.cum)+"</td><td><span class='"+tc+"'>"+x.tag+"</span>"+(dl?" <span class='muted'>· "+dl+"</span>":"")+"</td></tr>";}).join("")+"</table>";
+  const ladTbl=arr=>"<table class='minitable'><tr><th>Дата</th><th class='r'>Разн.</th><th>Документы / диагноз</th></tr>"+arr.map(x=>{const dl=x.docs.map(d=>"R"+d.row+(d.counter?" "+d.counter:"")).join(", ");const tc=x.sev==="round"?"tamb":"tred";return "<tr><td>"+druK(x.date)+"</td><td class='r "+(x.diff<0?"tred":"tamb")+"'>"+sgn(x.diff)+"</td><td><span class='"+tc+"'>"+x.tag+"</span>"+(dl?" <span class='muted'>· "+dl+"</span>":"")+"</td></tr>";}).join("")+"</table>";
   const L=R.ladders||{};const ladBlocks=[];
-  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{const a=L[p[1]];if(a&&a.length)ladBlocks.push("<div class='ladsub'><div class='ladh'>"+p[0]+" · расхождений: "+a.length+"</div>"+ladTbl(a)+"</div>");});
-  const ladderCard=ladBlocks.length?"<div class='card steel span2'><div class='ch'><span class='ct'>Дневная лестница расхождений 1С ↔ бух</span><span class='sev zone'>Поэтапно</span></div><div class='desc'>Каждый день, где суммы 1С и операционного блока расходятся, с нарастающим итогом. Одна проводка за день → локализовано до документа; агрегат (Z-отчёт продаж) → до дня. Жёлтым — мелкие круглые суммы (&lt;100, без копеек), обычно округление/недостача смены; красным — расхождения для разбора.</div>"+ladBlocks.join("")+"</div>":"";
+  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{const o=L[p[1]];if(!o||!o.total)return;
+    const head="<div class='ladh'>"+p[0]+" · расхождений по дням: "+o.total+(o.collapsed?" · свёрнуто как тайминг: "+o.collapsed+(o.redated?" (в т.ч. совпад. суммы на разных датах: "+o.redated+")":""):"")+(o.residual.length?" · остаток: "+o.residual.length:"")+"</div>";
+    const body=o.residual.length?ladTbl(o.residual):"<div class='muted' style='padding:4px 2px'>Все дневные расхождения сворачиваются как сдвиг проводок (±"+K.DATE_WIN+" дн.) или агрегация за несколько/выходных дней — кумулятив возвращается к нулю, по периоду категория сходится"+(o.net!=null?" (нетто "+sgn(o.net)+")":"")+".</div>";
+    ladBlocks.push("<div class='ladsub'>"+head+body+"</div>");});
+  const ladderCard=ladBlocks.length?"<div class='card steel span2'><div class='ch'><span class='ct'>Дневная лестница расхождений 1С ↔ бух</span><span class='sev zone'>После сворачивания тайминга</span></div><div class='desc'>Сначала сворачивается тайминг: сдвиг проводок на ±"+K.DATE_WIN+" дн. и агрегация за несколько/выходные дни (кумулятив возвращается к нулю — взаимно гасятся). Показаны только НЕсводимые остатки. Одна проводка за день → локализовано до документа; агрегат (Z-отчёт продаж) → до дня. Жёлтым — округление/недостача смены; красным — для разбора.</div>"+ladBlocks.join("")+"</div>":"";
   // диагностика
   let diagCard="";
   const dParts=[];
@@ -473,6 +489,7 @@ function renderReport(R){
   if(R.pkoModal!=null)dParts.push("Даты ПКО: "+(R.pkoModal*100).toFixed(0)+"% → "+(R.pkoRel?"надёжны":"НЕдостоверны"));
   if(R.diag&&R.diag.cusum&&R.diag.cusum.length)dParts.push("CUSUM (точка разлада прихода): "+R.diag.cusum.join(", "));
   if(R.diag&&R.diag.modz&&R.diag.modz.length)dParts.push("Модиф. z-аномалии прихода (|M|>3.5): "+R.diag.modz.join(", "));
+  if(R.diag&&R.diag.lag){const ln=[];["dep","ref","in"].forEach(k=>{const ls=R.diag.lag[k];if(ls&&ls.best>=1&&ls.sc[0]>0&&ls.sc[ls.best]<ls.sc[0]*0.7)ln.push(({dep:"инкассация",ref:"возвраты",in:"приход"}[k])+" 1С ≈ бух со сдвигом "+ls.best+" дн.");});if(ln.length)dParts.push("Сдвиг проводок: "+ln.join("; ")+" — плюс агрегация за несколько/выходных дней; учтено при сворачивании лестницы.");}
   diagCard="<div class='card steel span2'><div class='ch'><span class='ct'>Диагностика и контроль</span><span class='sev zone'>Контроль</span></div><div class='desc'>"+dParts.map(p=>"• "+p).join("<br>")+"<br>• Активные методы: дневная+кумулятивная сверка, сопоставление сторно, subset-sum, сигнатуры задвоения, дубль номер+сумма, Левенштейн (имена), модиф. z + IQR, CUSUM. Закон Бенфорда и ML отключены (объём недостаточен, нужна объяснимость).</div></div>";
   const factCard="<div class='card fact span2'><div class='ch'><span class='ct'>Контроль и арифметика</span><span class='sev fact'>Факт</span></div><table class='minitable'><tr><th>Показатель</th><th class='r'>Значение</th></tr>"+
     "<tr><td>Приход по кассе ("+R.cash+")</td><td class='r'>"+fmt(R.sumD)+"</td></tr>"+
@@ -512,9 +529,11 @@ function buildExcel(R){
   const pushCat=(cat,arr)=>(arr||[]).slice().sort((a,b)=>(a.date-b.date)||(a.row-b.row)).forEach(d=>dd2.push([cat,d.row,dru(d.date),d.type,d.docnum||"",d.counter||"",d.amt,d.flag==="err"?"ошибка":d.flag==="corr"?"сторно":""]));
   pushCat("Инкассация",R.catDocs.dep);pushCat("Возвраты",R.catDocs.ref);pushCat("Приход",R.catDocs.in);pushCat("Размен/прочее",R.catDocs.other);
   XLSX.utils.book_append_sheet(wb,aoa(dd2,[15,7,12,18,9,12,14,10]),"Документы");
-  const lad=[["Категория","Дата","1С","Бух","Разница","Кумулятив","Документы","Диагноз"]];
-  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{((R.ladders&&R.ladders[p[1]])||[]).forEach(x=>lad.push([p[0],druK(x.date),x.oneC,x.buh,x.diff,x.cum,x.docs.map(d=>"R"+d.row).join(" "),x.tag]));});
-  if(lad.length>1)XLSX.utils.book_append_sheet(wb,aoa(lad,[14,12,14,14,11,12,18,38]),"Лестница");
+  const lad=[["Категория","Свёрнуто тайминг (дн.)","Остаток (дн.)","Дата остатка","Разница","Документы","Диагноз"]];
+  [["Приход","in"],["Инкассация","dep"],["Возвраты","ref"]].forEach(p=>{const o=R.ladders&&R.ladders[p[1]];if(!o||!o.total)return;
+    if(!o.residual.length){lad.push([p[0],o.collapsed,0,"—","","","свёрнуто полностью — тайминг/агрегация, нетто "+(o.net!=null?fmt(o.net):"0")]);return;}
+    o.residual.forEach((x,i)=>lad.push([i===0?p[0]:"",i===0?o.collapsed:"",i===0?o.residual.length:"",druK(x.date),x.diff,x.docs.map(d=>"R"+d.row).join(" "),x.tag]));});
+  if(lad.length>1)XLSX.utils.book_append_sheet(wb,aoa(lad,[12,20,12,12,12,16,40]),"Лестница");
   XLSX.writeFile(wb,"Касса_"+R.cash+"_анализ.xlsx");
 }
 
