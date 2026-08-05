@@ -1,0 +1,848 @@
+"""Модель данных — §4 ТЗ, плюс схема конфигурации §6.
+
+Здесь описаны только структуры данных и перечисления. Вычислений нет.
+
+Соглашения, обязательные для всего пакета (§10, §12 ТЗ):
+
+* денежные величины — только :class:`decimal.Decimal`, квантование до 2 знаков,
+  ``ROUND_HALF_UP``; ``float`` в расчётах сумм запрещён;
+* внутренние сравнения сумм — в копейках (``int``), где это упрощает точность
+  (subset-sum §7.3 обязательно в копейках);
+* пользовательские строки — русские, коды находок — латиница (§12).
+
+`Config` живёт в этом модуле, а не в отдельном `config.py`: §10 ТЗ фиксирует
+состав пакета, и добавлять модули сверх списка нельзя.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+__all__ = [
+    "AnalysisResult",
+    "AuditLogEntry",
+    "BalanceTrace",
+    "BlockLayout",
+    "CalendarAggregation",
+    "CalendarConfig",
+    "Category",
+    "CategoryRecon",
+    "CausalLine",
+    "ChangePointWindow",
+    "ChangepointConfig",
+    "ClassifyResult",
+    "CollapseResult",
+    "Config",
+    "DocType",
+    "FallbackVerification",
+    "FileMeta",
+    "Finding",
+    "FindingCode",
+    "IngestResult",
+    "LagResult",
+    "LedgerEntry",
+    "LedgerTotals",
+    "LocalizationResult",
+    "LocalizationStatus",
+    "Materiality",
+    "MaterialityConfig",
+    "MaterialityThresholds",
+    "NonNegativityReport",
+    "NormalizeResult",
+    "OpsClass",
+    "OpsEntry",
+    "OpsKind",
+    "ParseIssue",
+    "PatternsConfig",
+    "PostingMode",
+    "ReversalResult",
+    "Severity",
+    "Signature",
+    "SignaturesConfig",
+    "StatisticsConfig",
+    "SubsetSumConfig",
+    "SubsetSumGateReport",
+    "SweepPoint",
+    "TargetBalanceRule",
+    "Thresholds",
+    "ValidationCheck",
+    "ValidationReport",
+    "Waterfall",
+    "WindowFlows",
+    "config_sha256",
+    "load_config",
+]
+
+
+# --------------------------------------------------------------------------- #
+# Перечисления
+# --------------------------------------------------------------------------- #
+
+
+class Category(StrEnum):
+    """Категория денежного потока по корреспондирующему счёту — §3.5, §5.4."""
+
+    INCOME = "ПРИХОД"
+    COLLECTION = "ИНКАССАЦИЯ"
+    REFUND = "ВОЗВРАТ"
+    EXCHANGE = "РАЗМЕН"
+    OTHER = "ПРОЧЕЕ"
+
+
+class DocType(StrEnum):
+    """Тип документа 1С по тексту колонки C — §3.2."""
+
+    PKO = "ПКО"
+    RKO = "РКО"
+    REVERSAL = "СТОРНО"
+    TRANSFER = "ПЕРЕВОД"
+    OTHER = "ПРОЧЕЕ"
+
+
+class OpsKind(StrEnum):
+    """Блок опер-лога, из которого пришла запись — §3.3."""
+
+    PKO = "ПКО"
+    RKO = "РКО"
+
+
+class OpsClass(StrEnum):
+    """Классификация записи опер-лога — §3.6."""
+
+    COLLECTION = "ИНКАССАЦИЯ"
+    REFUND = "ВОЗВРАТ"
+    SERVICE = "СЛУЖЕБНАЯ"
+    INCOME = "ПРИХОД"
+
+
+class Severity(StrEnum):
+    """Уровень находки — §8."""
+
+    ERROR = "ОШИБКА"
+    REVIEW = "ПРОВЕРИТЬ"
+    NORMAL = "НОРМА"
+    INFO = "ИНФО"
+
+
+class Materiality(StrEnum):
+    """Материальность находки — §7.5."""
+
+    MATERIAL = "СУЩЕСТВЕННО"
+    IMMATERIAL = "НЕСУЩЕСТВЕННО"
+    TRIVIAL = "ТРИВИАЛЬНО"
+
+
+class FindingCode(StrEnum):
+    """Таксономия находок — §8. Коды латиницей (§12)."""
+
+    RKO_WITHOUT_PAYOUT = "RKO_WITHOUT_PAYOUT"
+    RKO_OVERSTATED = "RKO_OVERSTATED"
+    PKO_DOUBLE_BOOKED = "PKO_DOUBLE_BOOKED"
+    PAYOUT_NOT_BOOKED = "PAYOUT_NOT_BOOKED"
+    REVERSAL_PAIR = "REVERSAL_PAIR"
+    REVERSAL_UNMATCHED = "REVERSAL_UNMATCHED"
+    REVERSAL_WITHOUT_REBOOK = "REVERSAL_WITHOUT_REBOOK"
+    SERVICE_MISCLASSIFIED = "SERVICE_MISCLASSIFIED"
+    POSTING_DELAY = "POSTING_DELAY"
+    SHIFT_ROUNDING = "SHIFT_ROUNDING"
+    PERIOD_CUTOFF = "PERIOD_CUTOFF"
+    LOG_IMBALANCE = "LOG_IMBALANCE"
+    REPEAT_PAYOUT = "REPEAT_PAYOUT"
+    LATE_TIME_DOC = "LATE_TIME_DOC"
+    SEQUENCE_GAP = "SEQUENCE_GAP"
+    DUPLICATE_DOC = "DUPLICATE_DOC"
+    UNKNOWN_ACCOUNT = "UNKNOWN_ACCOUNT"
+
+
+class PostingMode(StrEnum):
+    """Режим проведения по категории — §5.9.1."""
+
+    PER_DOCUMENT = "ПОДОКУМЕНТНЫЙ"
+    DAILY_AGGREGATE = "ДНЕВНЫЕ_АГРЕГАТЫ"
+
+
+class LocalizationStatus(StrEnum):
+    """Итог локализации — §5.9, §7.3.
+
+    ``NOT_LOCALIZED`` и ``REFUSED_*`` реализуют принцип «отказ вместо догадки»
+    (§0.3): недоказанная улика хуже отсутствия результата.
+    """
+
+    LOCALIZED = "ЛОКАЛИЗОВАНО"
+    PROBABLE = "ВЕРОЯТНО"
+    AMBIGUOUS = "AMBIGUOUS"
+    NOT_LOCALIZED = "НЕ_ЛОКАЛИЗОВАНО"
+    REFUSED_CANDIDATE_COUNT = "ОТКАЗ_ЧИСЛО_КАНДИДАТОВ"
+    REFUSED_DENSITY = "ОТКАЗ_ПЛОТНОСТЬ"
+    REFUSED_PERMUTATION = "ОТКАЗ_ПЕРЕСТАНОВОЧНЫЙ_ТЕСТ"
+    REFUSED_BELOW_Z_REPORT = "ОТКАЗ_НИЖЕ_АГРЕГАТА_ПРОДАЖ"
+
+
+# --------------------------------------------------------------------------- #
+# Базовый класс
+# --------------------------------------------------------------------------- #
+
+
+class _Frozen(BaseModel):
+    """Неизменяемая модель: стадии конвейера не мутируют вход (§5)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class _Mutable(BaseModel):
+    """Изменяемая модель — только там, где §4 ТЗ явно не требует ``frozen``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+# --------------------------------------------------------------------------- #
+# §4.1–4.2 — нормализованные записи
+# --------------------------------------------------------------------------- #
+
+
+class LedgerEntry(_Frozen):
+    """Нормализованная проводка 1С — §4.1 ТЗ.
+
+    ``counter_account`` берётся из колонки G для дебетовых проводок и из
+    колонки E для кредитовых (§3.2) — перепутанные счета ломают классификацию.
+    """
+
+    row: int
+    date: date
+    debit: Decimal
+    credit: Decimal
+    counter_account: str
+    category: Category
+    doc_text: str
+    doc_number: str
+    doc_type: DocType
+    is_reversal: bool
+    running_balance: Decimal = Decimal("0.00")
+
+
+class OpsEntry(_Frozen):
+    """Запись опер-лога — §4.2 ТЗ.
+
+    ``classified_by`` хранит способ классификации (``"counterparty"`` либо
+    ``"time_fallback"``) для аудиторского следа §12.
+    """
+
+    row: int
+    dt: datetime
+    amount: Decimal
+    counterparty: str
+    kind: OpsKind
+    classification: OpsClass
+    classified_by: str
+
+
+# --------------------------------------------------------------------------- #
+# §5.1 — ingest
+# --------------------------------------------------------------------------- #
+
+
+class BlockLayout(_Frozen):
+    """Найденные позиции блоков опер-лога — §3.3.
+
+    Индексы колонок ``(дата, сумма, контрагент)``; ``None`` означает, что блок
+    в файле отсутствует (вариант D) либо колонки контрагента нет (вариант C).
+    """
+
+    header_row: int
+    rko: tuple[int, int, int | None] | None
+    pko: tuple[int, int, int | None] | None
+    variant: str
+
+
+class FileMeta(_Frozen):
+    """Метаданные входного файла — §4.4, §5.1, §12."""
+
+    path: Path
+    sha256: str
+    pvz_id: str | None
+    stated_period: tuple[date, date] | None
+    actual_period: tuple[date, date] | None
+    rules_version: str
+    config_sha256: str
+    run_timestamp: datetime
+
+
+class ParseIssue(_Frozen):
+    """Строка, которую не удалось разобрать — §12, «никаких тихих пропусков»."""
+
+    row: int
+    column: int | None
+    reason: str
+    raw_value: str
+
+
+class IngestResult(_Frozen):
+    """Выход стадии INGEST — §5.1."""
+
+    meta: FileMeta
+    raw_rows: tuple[tuple[object, ...], ...]
+    layout: BlockLayout
+    issues: tuple[ParseIssue, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.2 — normalize
+# --------------------------------------------------------------------------- #
+
+
+class LedgerTotals(_Frozen):
+    """Контрольные суммы из служебных строк карточки — §3.2.
+
+    ``opening`` и ``closing_stated`` читаются из колонки 4 (E), не из 9 —
+    ловушка §3.2, стоившая ошибки на Щучине.
+    """
+
+    opening: Decimal
+    closing_stated: Decimal
+    turnover_debit: Decimal | None
+    turnover_credit: Decimal | None
+
+
+class NormalizeResult(_Frozen):
+    """Выход стадии NORMALIZE — §5.2."""
+
+    ledger: tuple[LedgerEntry, ...]
+    ops: tuple[OpsEntry, ...]
+    totals: LedgerTotals
+    issues: tuple[ParseIssue, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.3 — validate
+# --------------------------------------------------------------------------- #
+
+
+class ValidationCheck(_Frozen):
+    """Результат одного контроля V1–V6 — §5.3."""
+
+    code: str
+    passed: bool
+    skipped: bool
+    expected: Decimal | None
+    actual: Decimal | None
+    message: str
+
+
+class ValidationReport(_Frozen):
+    """Отчёт стадии VALIDATE — §5.3.
+
+    Нарушение V1–V3 = остановка со статусом ошибки, а не предупреждение.
+    """
+
+    checks: tuple[ValidationCheck, ...]
+    hard_failed: bool
+    daily_reconciliation_enabled: bool
+    unknown_accounts: tuple[str, ...]
+    cutoff_suspected: bool
+
+
+# --------------------------------------------------------------------------- #
+# §5.4 — classify
+# --------------------------------------------------------------------------- #
+
+
+class FallbackVerification(_Frozen):
+    """Верификация time-fallback варианта C — §3.3.
+
+    Гипотеза принимается только при ``exact_day_share >= 0.90``; иначе
+    приложение обязано остановиться со статусом ``BLOCK_CLASSIFICATION_FAILED``.
+    """
+
+    accepted: bool
+    days_total: int
+    days_exact: int
+    exact_day_share: float
+    collection_delta: Decimal
+    refund_delta: Decimal
+
+
+class ClassifyResult(_Frozen):
+    """Выход стадии CLASSIFY — §5.4."""
+
+    ledger: tuple[LedgerEntry, ...]
+    ops: tuple[OpsEntry, ...]
+    fallback: FallbackVerification | None
+    unknown_accounts: tuple[str, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.5 — reversals
+# --------------------------------------------------------------------------- #
+
+
+class ReversalResult(_Frozen):
+    """Выход стадии NEUTRALIZE_REVERSALS — §5.5.
+
+    ``neutralized_rows`` — номера строк, исключаемых из сверки §5.6.
+    """
+
+    neutralized_rows: frozenset[int]
+    findings: tuple[Finding, ...]
+    audit_log: tuple[AuditLogEntry, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.6 — reconcile
+# --------------------------------------------------------------------------- #
+
+
+class CategoryRecon(_Frozen):
+    """Сверка по одной категории — §5.6.
+
+    ``ratio = |нетто| / брутто``: 0 — чистый churn, 1 — односторонний сдвиг.
+    Возвраты присутствуют в двух вариантах: «как есть» и «скорректировано»
+    (за вычетом служебных записей §3.6).
+    """
+
+    category: Category
+    acc_total: Decimal
+    ops_total: Decimal
+    net: Decimal
+    gross: Decimal
+    ratio: float | None
+    days_with_difference: int
+    daily_differences: tuple[tuple[date, Decimal], ...]
+    adjusted_net: Decimal | None
+    adjusted_gross: Decimal | None
+
+
+# --------------------------------------------------------------------------- #
+# §5.7 — timing
+# --------------------------------------------------------------------------- #
+
+
+class LagResult(_Frozen):
+    """Детектор лага — §5.7.1.
+
+    Лаг значим при ``lagScore(best) < LAG_SIGNIFICANT_RATIO * lagScore(0)``.
+    Диагностический вывод: свёртку не меняет, объясняет её пользователю.
+    """
+
+    best_lag: int
+    scores: tuple[Decimal, ...]
+    significant: bool
+
+
+class CalendarAggregation(_Frozen):
+    """Распознанный паттерн «понедельник агрегирует выходные» — §5.7.3."""
+
+    posting_date: date
+    source_dates: tuple[date, ...]
+    acc_amount: Decimal
+    ops_amount: Decimal
+
+
+class CollapseResult(_Frozen):
+    """Результат свёртки тайминга — §5.7.2.
+
+    ``redated`` считается отдельно: проход 3 намеренно консервативен, но может
+    свести две разные операции, случайно равные по сумме. Остаток маркируется
+    «для разбора», а не «ошибка».
+    """
+
+    residual: Decimal
+    collapsed: int
+    redated: int
+    total: int
+    residual_days: tuple[tuple[date, Decimal], ...]
+    lag: LagResult | None
+    calendar_aggregations: tuple[CalendarAggregation, ...]
+    audit_log: tuple[AuditLogEntry, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.8 — balance
+# --------------------------------------------------------------------------- #
+
+
+class NonNegativityReport(_Frozen):
+    """Инвариант неотрицательности относительно T — §5.8.2."""
+
+    first_below_target: date | None
+    never_recovered_after: date | None
+    minimum: Decimal
+    minimum_date: date | None
+    share_of_days_below: float
+
+
+class SweepPoint(_Frozen):
+    """Точка «пола кассы» — §5.8.3.
+
+    ``is_full`` = False означает частичную выемку: такие точки помечаются
+    «частичная выемка — не показатель» и в ряд пола не входят.
+    """
+
+    date: date
+    floor: Decimal
+    collection: Decimal
+    income: Decimal
+    is_full: bool
+
+
+class ChangePointWindow(_Frozen):
+    """Датирование level shift окном, а не точкой — §5.8.4.
+
+    ``method`` — ``"pelt"`` (основной, ruptures), подтверждающие — ``"cusum"``,
+    ``"ewma"``.
+    """
+
+    method: str
+    index: int
+    window: tuple[date, date]
+    confirmed_by: tuple[str, ...]
+
+
+class WindowFlows(_Frozen):
+    """Сопоставление потоков внутри окна смещения — §5.8.5."""
+
+    window: tuple[date, date]
+    ledger_flow: Decimal
+    ops_flow: Decimal
+    dominant_category: Category | None
+
+
+class BalanceTrace(_Frozen):
+    """Выход стадии BALANCE_TRACE — §5.8."""
+
+    opening: Decimal
+    closing_computed: Decimal
+    target: Decimal
+    nonnegativity: NonNegativityReport
+    sweep_points: tuple[SweepPoint, ...]
+    change_points: tuple[ChangePointWindow, ...]
+    shift_windows: tuple[WindowFlows, ...]
+    quarterly_balances: tuple[tuple[str, Decimal], ...]
+
+
+# --------------------------------------------------------------------------- #
+# §5.9 / §7 — localize
+# --------------------------------------------------------------------------- #
+
+
+class SubsetSumGateReport(_Frozen):
+    """Протокол четырёх гейтов доказательности — §7.3.
+
+    Находка принимается только при ``all(...)`` четырёх флагов. Протокол
+    сохраняется всегда, включая отказы: пользователь должен видеть причину.
+    """
+
+    candidate_count: int
+    gate_count_passed: bool
+    gate_unique_passed: bool
+    gate_density_passed: bool
+    gate_permutation_passed: bool
+    expected_solutions: float | None
+    p_value: float | None
+    permutation_b: int
+    seed: int
+    refusal_reason: str | None
+
+
+class LocalizationResult(_Frozen):
+    """Результат локализации одного проблемного дня/окна — §5.9."""
+
+    date: date
+    category: Category
+    mode: PostingMode
+    status: LocalizationStatus
+    amount: Decimal
+    ledger_rows: tuple[int, ...]
+    ops_rows: tuple[int, ...]
+    doc_numbers: tuple[str, ...]
+    gates: SubsetSumGateReport | None
+    explanation: str
+
+
+# --------------------------------------------------------------------------- #
+# §4.3 / §5.10–5.11 — находки, раскладка, ранжирование
+# --------------------------------------------------------------------------- #
+
+
+class Finding(_Mutable):
+    """Находка — §4.3 ТЗ.
+
+    ``amount`` и ``balance_impact`` различаются намеренно: 35 непроведённых
+    выдач Солигорска на 8 411,73 имеют ``balance_impact = 0``, потому что этих
+    проводок в 1С нет вовсе. Путать пробел контроля с причиной отклонения
+    нельзя.
+    """
+
+    code: FindingCode
+    severity: Severity
+    date: date | tuple[date, date]
+    amount: Decimal
+    ledger_rows: list[int] = Field(default_factory=list)
+    ops_rows: list[int] = Field(default_factory=list)
+    doc_numbers: list[str] = Field(default_factory=list)
+    title: str
+    explanation: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    confidence: float
+    materiality: Materiality
+    balance_impact: Decimal
+
+
+class MaterialityThresholds(_Frozen):
+    """Пороги материальности — §7.5."""
+
+    benchmark: Decimal
+    overall: Decimal
+    performance: Decimal
+    trivial: Decimal
+
+
+class CausalLine(_Frozen):
+    """Строка причинной раскладки — §5.10.
+
+    Каждая строка обязана ссылаться на ``Finding`` с трассировкой.
+    """
+
+    amount: Decimal
+    title: str
+    finding_index: int | None
+    doc_numbers: tuple[str, ...]
+
+
+class Waterfall(_Frozen):
+    """Раскладка отклонения без остатка — §5.10.
+
+    ``log_imbalance`` (ПКО − РКО_инкассация − РКО_возвраты) выводится отдельной
+    строкой: это дефект первички, а не учёта, и смешивать его с расхождениями
+    1С запрещено. Требование приёмки: ``|unresolved| < EPS_TIE``.
+    """
+
+    closing: Decimal
+    target: Decimal
+    income_delta: Decimal
+    collection_delta: Decimal
+    refund_delta: Decimal
+    other_delta: Decimal
+    log_imbalance: Decimal
+    unresolved: Decimal
+    causal_lines: tuple[CausalLine, ...]
+
+
+# --------------------------------------------------------------------------- #
+# §8.1–8.2 — сигнатуры
+# --------------------------------------------------------------------------- #
+
+
+class Signature(_Frozen):
+    """Сигнатура риска — §8.1–8.2.
+
+    ``baseline`` обязателен для повторов: базовая частота по ПКО включается в
+    отчёт как контекст, иначе сигнатура читается как обвинение (§8.1).
+    """
+
+    code: FindingCode
+    title: str
+    date: date | None
+    amount: Decimal | None
+    rows: tuple[int, ...]
+    baseline: str | None
+    explanation: str
+
+
+# --------------------------------------------------------------------------- #
+# §12 — аудиторский след
+# --------------------------------------------------------------------------- #
+
+
+class AuditLogEntry(_Frozen):
+    """Запись журнала автогашения — §12.
+
+    Для каждого автоматического гашения: что погашено, чем, каким правилом.
+    Журнал попадает в JSON и в лист Excel по флагу ``--audit-log``.
+    """
+
+    stage: str
+    rule: str
+    subject_rows: tuple[int, ...]
+    counterpart_rows: tuple[int, ...]
+    amount: Decimal
+    note: str
+
+
+# --------------------------------------------------------------------------- #
+# §4.4 — результат анализа
+# --------------------------------------------------------------------------- #
+
+
+class AnalysisResult(_Mutable):
+    """Полный результат анализа — §4.4 ТЗ.
+
+    Сериализуется в JSON (§9.2) как эталон для регрессионных тестов §11.3.
+    Повторный прогон обязан давать побитово идентичный JSON (§13.5).
+    """
+
+    meta: FileMeta
+    validation: ValidationReport
+    reconciliation: dict[Category, CategoryRecon]
+    timing: dict[Category, CollapseResult]
+    balance_trace: BalanceTrace
+    waterfall: Waterfall
+    findings: list[Finding]
+    signatures: list[Signature]
+    localizations: list[LocalizationResult] = Field(default_factory=list)
+    audit_log: list[AuditLogEntry] = Field(default_factory=list)
+    unresolved: Decimal
+
+
+# --------------------------------------------------------------------------- #
+# §6 — конфигурация
+# --------------------------------------------------------------------------- #
+
+
+class TargetBalanceRule(_Frozen):
+    """Элемент ``target_balance_schedule`` — §6."""
+
+    from_: date = Field(alias="from")
+    value: Decimal
+
+
+class Thresholds(_Frozen):
+    """Секция ``thresholds`` — §6."""
+
+    EPS_FLOOR: Decimal
+    EPS_SUM: Decimal
+    EPS_TIE: Decimal
+    DATE_WIN: int
+    LONG_WIN: int
+    MAX_LAG: int
+    LAG_SIGNIFICANT_RATIO: float
+    MODAL_BAD: float
+    MIN_DAYS: int
+    SWEEP_MIN_RATIO: float
+    ROUND_MAX: Decimal
+    AGGREGATE_RATIO: float
+
+
+class SubsetSumConfig(_Frozen):
+    """Секция ``subset_sum`` — §6, гейты §7.3."""
+
+    MAX_CANDIDATES: int
+    HARD_MAX: int
+    REQUIRE_UNIQUE: bool
+    MAX_SUBSET_SIZE: int | None
+    PERMUTATION_B: int
+    PERMUTATION_ALPHA: float
+    TOLERANCE: Decimal
+
+
+class ChangepointConfig(_Frozen):
+    """Секция ``changepoint`` — §6, метод §5.8.4."""
+
+    method: str
+    model: str
+    penalty: str
+    min_size: int
+    cusum_k: float
+    cusum_h: float
+    ewma_lambda: float
+    ewma_L: float
+
+
+class StatisticsConfig(_Frozen):
+    """Секция ``statistics`` — §6.
+
+    ``benford_min_n``: закон Бенфорда не применяется при N < ~1700 (§15).
+    """
+
+    mod_z_threshold: float
+    iqr_soft: float
+    iqr_extreme: float
+    benford_min_n: int
+    fuzzy_name_threshold: float
+
+
+class SignaturesConfig(_Frozen):
+    """Секция ``signatures`` — §6, §8.1."""
+
+    repeat_window_minutes: int
+    repeat_min_count: int
+    late_time: str
+    business_hours: tuple[str, str]
+
+
+class MaterialityConfig(_Frozen):
+    """Секция ``materiality`` — §6, §7.5."""
+
+    benchmark: str
+    overall_pct: float
+    performance_pct: float
+    trivial_pct: float
+
+
+class CalendarConfig(_Frozen):
+    """Секция ``calendar`` — §6, §5.7.3."""
+
+    holidays_file: Path
+
+
+class PatternsConfig(_Frozen):
+    r"""Секция ``patterns`` — §6, §3.6.
+
+    ``service_recipients`` обязан быть заякорен (``^суд\b``): версия без якоря
+    отбрасывала выдачу «Правосуд Дмитрий» (§3.6).
+    """
+
+    central_cash: str
+    service_recipients: str
+    reversal_doc: str
+
+
+class Config(_Frozen):
+    """Единый YAML-конфиг — §6 ТЗ.
+
+    Версионируется вместе с кодом; хеш конфига попадает в отчёт (§12).
+    """
+
+    version: str
+    cash_account: str
+    target_balance: Decimal
+    target_balance_schedule: tuple[TargetBalanceRule, ...] = ()
+    seed: int
+    accounts: dict[str, tuple[str, ...]]
+    patterns: PatternsConfig
+    thresholds: Thresholds
+    subset_sum: SubsetSumConfig
+    changepoint: ChangepointConfig
+    statistics: StatisticsConfig
+    signatures: SignaturesConfig
+    materiality: MaterialityConfig
+    calendar: CalendarConfig
+
+
+def load_config(path: Path) -> Config:
+    """Загрузить и провалидировать YAML-конфиг §6.
+
+    Args:
+        path: путь к ``config/default.yaml`` или пользовательскому конфигу.
+
+    Returns:
+        Разобранный :class:`Config`.
+
+    Raises:
+        NotImplementedError: каркас, реализация — этап 1 (§14).
+    """
+    raise NotImplementedError
+
+
+def config_sha256(path: Path) -> str:
+    """Хеш конфига для метаданных отчёта — §12, «версионирование правил».
+
+    Raises:
+        NotImplementedError: каркас, реализация — этап 1 (§14).
+    """
+    raise NotImplementedError

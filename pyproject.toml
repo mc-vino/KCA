@@ -1,0 +1,188 @@
+[project]
+name = "cashforensics"
+version = "0.1.0"
+description = "Форензик-анализ операционных касс ПВЗ: сверка 1С (счёт 50.2) с опер-логом, локализация причин отклонения сальдо"
+readme = "README.md"
+authors = [
+    { name = "Claude", email = "noreply@anthropic.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "openpyxl>=3.1.5",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+    "rapidfuzz>=3.14.5",
+    "ruptures>=1.1.10",
+    "scipy>=1.17.1",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+cashforensics = "cashforensics:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.165.0",
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.1",
+    "scipy-stubs>=1.17.1.5",
+    "syrupy>=5.5.3",
+    "types-openpyxl>=3.1.5.20260724",
+    "types-pyyaml>=6.0.12.20260724",
+]
+
+# --------------------------------------------------------------------------- #
+# pytest — §11 ТЗ
+#
+# Маркеры соответствуют трём уровням тестов: юнит (§11.1), синтетика (§11.2),
+# регрессия на восьми калибровочных кассах (§11.3).
+#
+# syrupy подключается автоматически как плагин (entry point); снапшоты
+# регрессии живут в tests/regression/__snapshots__.
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+]
+markers = [
+    "unit: юнит-тесты отдельных функций (§11.1 ТЗ)",
+    "synthetic: синтетические кассы с внедрёнными дефектами (§11.2 ТЗ)",
+    "regression: регрессия на восьми калибровочных кассах со снапшотами (§11.3 ТЗ)",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["src/cashforensics"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+# --------------------------------------------------------------------------- #
+# ruff — строгий режим
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203",    # конфликтует с D211
+    "D213",    # конфликтует с D212
+    "COM812",  # конфликтует с форматтером
+    "ISC001",  # конфликтует с форматтером
+
+    # Язык отчётов и комментариев — русский (§12 ТЗ). Правила «похожих
+    # символов» дают сплошной шум на кириллице.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+
+    # pydantic резолвит аннотации в рантайме: перенос импортов моделей в
+    # TYPE_CHECKING сломает построение схем.
+    "TC001",
+    "TC002",
+    "TC003",
+
+    "CPY001",  # заголовок копирайта в каждом файле не требуется
+
+    # Булевы флаги — часть интерфейса §10 (--no-collapse,
+    # --no-reversal-neutralization) и §5.6 («как есть» / «скорректировано»).
+    "FBT001",
+    "FBT002",
+    "FBT003",
+
+    # Имена исключений заданы ТЗ: статус §3.3 называется
+    # BLOCK_CLASSIFICATION_FAILED, а не ...Error.
+    "N818",
+
+    # Число аргументов стадий диктуется §5: стадия принимает всё, что ей нужно,
+    # явно, потому что не имеет права читать глобальное состояние.
+    "PLR0913",
+    "PLR0917",
+
+    # `evidence: dict[str, Any]` задан §4.3 ТЗ дословно.
+    "ANN401",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # assert — основной инструмент pytest
+    "PLR2004", # магические числа в ожиданиях теста
+    "D100",    # модульные docstring в тестах необязательны
+    "D103",
+    "INP001",
+    "PLC0415", # smoke-тест намеренно импортирует внутри функций
+]
+"src/cashforensics/cli.py" = [
+    "B008",    # typer.Option/Argument в значениях по умолчанию — идиома typer
+    "FBT001",  # булевы флаги CLI — часть интерфейса §10
+    "FBT002",
+    "PLR0913", # число опций диктуется §10
+]
+"src/cashforensics/models.py" = [
+    "N815",    # имена полей конфига (EPS_FLOOR и пр.) заданы §6 ТЗ дословно
+    "N803",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+mypy-init-return = true
+
+[tool.ruff.format]
+# Выключено намеренно: docstring содержат дословные цитаты псевдокода и моделей
+# данных из ТЗ (§4, §5.7.2, §5.8.3). Форматтер переписывал бы их, и цитата
+# переставала бы совпадать с источником.
+docstring-code-format = false
+
+# --------------------------------------------------------------------------- #
+# mypy — strict
+#
+# Денежные величины ходят только Decimal (§10). Строгий режим ловит места, где
+# Decimal молча смешивается с float: единственная разрешённая конвертация — на
+# входе в детектор разладки ruptures (§5.8.4), и она обязана быть локальной.
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+warn_no_return = true
+disallow_any_explicit = false
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+    "possibly-undefined",
+]
+
+# ruptures поставляется без аннотаций и без stub-пакета. Импортируем его как
+# Any: границу Decimal/float всё равно держит §5.8.4 balance.py, а не mypy.
+[[tool.mypy.overrides]]
+module = ["ruptures.*"]
+ignore_missing_imports = true
+disallow_untyped_calls = false
+
+# Вызовы нетипизированного ruptures локализованы в детекторе разладки.
+[[tool.mypy.overrides]]
+module = ["cashforensics.balance", "tests.test_env"]
+disallow_untyped_calls = false
