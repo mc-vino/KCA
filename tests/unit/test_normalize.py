@@ -16,7 +16,9 @@ from cashforensics.normalize import (
     clean_text,
     detect_doc_type,
     extract_doc_number,
+    find_ledger_header_row,
     inherit_dates,
+    is_analytics_row,
     normalize,
     parse_datetime,
     parse_decimal,
@@ -220,6 +222,64 @@ class TestDocumentText:
 
     def test_no_number_is_empty_not_error(self) -> None:
         assert extract_doc_number("Расходный кассовый ордер") == ""
+
+
+class TestRealExportStructure:
+    """Особенности настоящей выгрузки, найденные прогоном PAX_119011650."""
+
+    def test_analytics_row_is_not_a_parse_error(self) -> None:
+        """Одна проводка занимает несколько строк — §3.2.
+
+        В продолжениях заполнена только колонка «Операция»: «PAX 119011650»,
+        «Розничная торговля», «Основной договор». На Солигорске таких строк
+        15 378 из 82 611, и объявление их неразобранными похоронило бы
+        настоящие проблемы разбора под шумом.
+        """
+        analytics = (None, None, None, "PAX 119011650")
+        posting = (None, "31.03.2022", "Приходный кассовый ордер 000123456", None, "50.2")
+
+        assert is_analytics_row(analytics)
+        assert not is_analytics_row(posting)
+
+    def test_header_row_found_by_caption_pair(self) -> None:
+        """Заголовок карточки — «Дата» + «Документ» — §3.2."""
+        rows = [
+            (
+                None,
+                "31.03.2022 - 30.06.2026",
+            ),
+            (None, "Дата", "Документ", "Операция", "Дебет", None, "Кредит"),
+            (None, None, None, None, "Счет", "Сумма", "Счет", "Сумма"),
+        ]
+
+        assert find_ledger_header_row(rows) == 1
+
+    def test_period_caption_also_recognised(self) -> None:
+        """В части выгрузок первая колонка называется «Период» — §3.2."""
+        rows = [(None, "Период", "Документ")]
+
+        assert find_ledger_header_row(rows) == 0
+
+    def test_header_period_line_does_not_start_date_inheritance(
+        self,
+        make_workbook: Callable[[SheetPlan], Path],
+        config: Config,
+    ) -> None:
+        """Строка шапки «дд.мм.гггг - дд.мм.гггг» стоит в колонке даты — §3.2.
+
+        Без границы заголовка она запускала наследование даты до начала
+        таблицы, а сами строки шапки попадали в ``ParseIssue``.
+        """
+        plan = SheetPlan(
+            postings=[
+                Posting(date(2024, 2, 1), "ПКО 000123456", "50.2", Decimal("100.00"), "90.1.1"),
+            ],
+        )
+
+        result = normalize(ingest(make_workbook(plan), config), config)
+
+        assert result.issues == ()
+        assert len(result.ledger) == 1
 
 
 class TestReadTotals:

@@ -244,7 +244,12 @@ class TestCategoryReconciliation:
 class TestLogImbalance:
     """§5.10: логи сами не сходятся — отдельная строка, не расхождение 1С."""
 
-    def test_imbalance_excludes_service(self) -> None:
+    def test_imbalance_subtracts_all_payouts_including_service(self) -> None:
+        """Служебные РКО вычитаются: деньги из ящика вышли — §5.10.
+
+        Показатель меряет физическую сходимость лога, а не сверку возвратов.
+        Исключение служебных из §3.6 сюда не переносится.
+        """
         ops = (
             _ops(
                 1, datetime(2024, 2, 1, 9, 0, 0), Decimal("1000.00"), OpsClass.INCOME, OpsKind.PKO
@@ -254,7 +259,29 @@ class TestLogImbalance:
             _ops(4, datetime(2024, 2, 1, 12, 0, 0), Decimal("150.00"), OpsClass.SERVICE),
         )
 
-        assert log_imbalance(ops) == Decimal("200.00")
+        assert log_imbalance(ops) == Decimal("50.00")
+
+    def test_soligorsk_reference_totals(self) -> None:
+        """Эталон §11.3: дисбаланс логов Солигорска = −807,91.
+
+        Агрегаты реальной кассы PAX_119011650. Без вычета служебных 11 610,00
+        получалось +10 802,09 — ошибка чтения формулы §5.10, найденная прогоном
+        на реальном файле.
+        """
+        ops = (
+            _ops(
+                1,
+                datetime(2024, 2, 1, 9, 0, 0),
+                Decimal("14062584.98"),
+                OpsClass.INCOME,
+                OpsKind.PKO,
+            ),
+            _ops(2, datetime(2024, 2, 1, 10, 0, 0), Decimal("12977844.10"), OpsClass.COLLECTION),
+            _ops(3, datetime(2024, 2, 1, 11, 0, 0), Decimal("1073938.79"), OpsClass.REFUND),
+            _ops(4, datetime(2024, 2, 1, 12, 0, 0), Decimal("11610.00"), OpsClass.SERVICE),
+        )
+
+        assert log_imbalance(ops) == Decimal("-807.91")
 
     def test_balanced_log_gives_zero(self) -> None:
         ops = (

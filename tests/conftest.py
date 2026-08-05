@@ -115,15 +115,14 @@ def build_workbook(path: Path, plan: SheetPlan) -> Path:
 
     # Заголовок таблицы карточки плюс заголовки блоков опер-лога.
     header_3 = blank()
-    header_3[1] = "Период"
+    # Подписи взяты из реальной выгрузки PAX_119011650: заголовок карточки
+    # занимает две строки, во второй стоят «Счет | Сумма | Счет | Сумма».
+    header_3[1] = "Дата"
     header_3[2] = "Документ"
-    header_3[3] = "Аналитика Дт"
-    header_3[4] = "Счёт Дт"
-    header_3[5] = "Дебет"
-    header_3[6] = "Счёт Кт"
-    header_3[7] = "Кредит"
-    header_3[8] = "Сальдо"
-    header_3[9] = "Значение"
+    header_3[3] = "Операция"
+    header_3[4] = "Дебет"
+    header_3[6] = "Кредит"
+    header_3[8] = "Текущее сальдо"
 
     rko_start, pko_start = BLOCK_VARIANTS[plan.variant]
     if rko_start is not None:
@@ -136,6 +135,13 @@ def build_workbook(path: Path, plan: SheetPlan) -> Path:
         header_3[pko_start + 1] = "Сумма"
         header_3[pko_start + 2] = "От кого принято"
     rows.append(header_3)
+
+    header_4 = blank()
+    header_4[4] = "Счет"
+    header_4[5] = "Сумма"
+    header_4[6] = "Счет"
+    header_4[7] = "Сумма"
+    rows.append(header_4)
 
     # Сальдо на начало — значение в колонке 4 (E), не в 9 (§3.2).
     opening_row = blank()
@@ -172,7 +178,7 @@ def build_workbook(path: Path, plan: SheetPlan) -> Path:
         if start is None:
             return
         for offset, record in enumerate(records):
-            index = 4 + offset
+            index = 5 + offset
             while index >= len(rows):
                 rows.append(blank())
             rows[index][start] = record.moment.strftime("%d.%m.%Y %H:%M:%S")

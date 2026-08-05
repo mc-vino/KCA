@@ -29,6 +29,7 @@ from cashforensics.models import (
 __all__ = [
     "DATE_RE",
     "DOC_NUMBER_RE",
+    "HEADER_SCAN_ROWS",
     "MONEY_EXPONENT",
     "SERVICE_ROW_MARKERS",
     "actual_period",
@@ -37,7 +38,9 @@ __all__ = [
     "clean_text",
     "detect_doc_type",
     "extract_doc_number",
+    "find_ledger_header_row",
     "inherit_dates",
+    "is_analytics_row",
     "is_service_row",
     "normalize",
     "normalize_ledger",
@@ -57,6 +60,17 @@ DOC_NUMBER_RE = re.compile(r"\d{6,}")
 
 MONEY_EXPONENT = Decimal("0.01")
 """Квантование денежных величин — 2 знака, ``ROUND_HALF_UP`` (§10)."""
+
+HEADER_SCAN_ROWS = 20
+"""Глубина поиска строки-заголовка карточки — та же, что для блоков §3.3."""
+
+LEDGER_DATE_CAPTIONS = ("дата", "период")
+"""Заголовки первой колонки карточки — §3.2.
+
+На PAX_119011650 колонка названа «Дата»; в других выгрузках 1С встречается
+«Период». Заголовок опознаётся по паре «дата/период» + «документ», а не по
+одному варианту написания.
+"""
 
 SERVICE_ROW_MARKERS = (
     "Сальдо на начало",
@@ -84,6 +98,23 @@ COL_BALANCE_VALUE = 9
 
 LEDGER_COLUMNS = range(COL_DATE, COL_BALANCE_VALUE + 1)
 """Диапазон колонок карточки: строка вне него принадлежит опер-логу (§3.1)."""
+
+LEDGER_POSTING_COLUMNS = (
+    COL_DATE,
+    COL_DOC,
+    COL_DEBIT_ACCOUNT,
+    COL_DEBIT_AMOUNT,
+    COL_CREDIT_ACCOUNT,
+    COL_CREDIT_AMOUNT,
+    COL_BALANCE_VALUE,
+)
+"""Колонки, наличие которых делает строку кандидатом в проводки — §3.2.
+
+Колонка 3 («Операция») сюда намеренно не входит: одна проводка занимает в
+карточке несколько физических строк, и в продолжениях заполнена только она —
+«PAX 119011650», «Розничная торговля», «Основной договор». Это структура
+выгрузки, а не сбой разбора, и в ``ParseIssue`` такие строки не попадают.
+"""
 
 _CREDIT_SIDE = "К"
 
@@ -344,6 +375,54 @@ def read_totals(rows: Sequence[Sequence[object]]) -> LedgerTotals:
     )
 
 
+def find_ledger_header_row(rows: Sequence[Sequence[object]]) -> int:
+    """Найти строку-заголовок карточки — §3.2.
+
+    Заголовок: колонка 1 начинается с «Дата», колонка 2 — с «Документ».
+
+    Нужен, потому что шапка выгрузки лежит в той же колонке 1, что и даты
+    проводок: строка «31.03.2022 - 30.06.2026» разбирается как дата и без этой
+    границы запускала наследование даты до начала таблицы, а сами строки шапки
+    попадали в ``ParseIssue``.
+
+    Returns:
+        Индекс строки-заголовка либо ``-1``, если заголовок не найден — тогда
+        разбор идёт с начала листа.
+    """
+    for index in range(min(HEADER_SCAN_ROWS, len(rows))):
+        row = rows[index]
+        date_caption = clean_text(cell(row, COL_DATE)).lower()
+        doc_caption = clean_text(cell(row, COL_DOC)).lower()
+        if date_caption.startswith(LEDGER_DATE_CAPTIONS) and doc_caption.startswith("документ"):
+            return index
+    return -1
+
+
+def _is_subheader_row(row: Sequence[object]) -> bool:
+    """Вторая строка заголовка: «Счет | Сумма | Счет | Сумма» — §3.2."""
+    labels = {
+        clean_text(cell(row, index)).lower()
+        for index in (COL_DEBIT_ACCOUNT, COL_DEBIT_AMOUNT, COL_CREDIT_ACCOUNT, COL_CREDIT_AMOUNT)
+    }
+    return bool(labels & {"счет", "счёт", "сумма"})
+
+
+def is_analytics_row(row: Sequence[object]) -> bool:
+    """Строка-продолжение проводки: заполнена только колонка «Операция» — §3.2.
+
+    В карточке 1С одна проводка занимает несколько физических строк: первая
+    несёт дату, документ, счета и суммы, последующие — аналитику
+    («PAX 119011650», «ПВЗ Солигорск (розн)», «Основной договор»).
+
+    Такие строки не разбираются и не считаются ошибкой: на Солигорске их 15 378
+    из 82 611, и объявление их «неразобранными» похоронило бы настоящие
+    проблемы разбора под шумом.
+    """
+    if not clean_text(cell(row, COL_OPERATION)):
+        return False
+    return not any(clean_text(cell(row, index)) for index in LEDGER_POSTING_COLUMNS)
+
+
 def _row_touches_ledger(row: Sequence[object]) -> bool:
     """Строка несёт данные карточки, а не только опер-лога — §3.1."""
     return any(clean_text(cell(row, index)) for index in LEDGER_COLUMNS)
@@ -365,20 +444,23 @@ def normalize_ledger(
     Returns:
         Пара ``(записи, проблемы разбора)``.
     """
-    dates = inherit_dates(rows)
+    header_row = find_ledger_header_row(rows)
+    # Шапка выгрузки не участвует в наследовании даты: строка периода
+    # «31.03.2022 - 30.06.2026» стоит в колонке даты и сбивала бы его.
+    dates = (*(None,) * (header_row + 1), *inherit_dates(rows[header_row + 1 :]))
+
     entries: list[LedgerEntry] = []
     issues: list[ParseIssue] = []
-    seen_first_date = False
 
     for index, row in enumerate(rows):
         row_number = index + 1
-        if dates[index] is not None:
-            seen_first_date = True
-
-        if is_service_row(cell(row, COL_DATE)) or not _row_touches_ledger(row):
+        if index <= header_row or _is_subheader_row(row):
             continue
-        if not seen_first_date:
-            # Шапка и заголовки таблицы — до первой даты данных ещё нет.
+        if (
+            is_service_row(cell(row, COL_DATE))
+            or is_analytics_row(row)
+            or not _row_touches_ledger(row)
+        ):
             continue
 
         direction = posting_direction(row, config.cash_account)
