@@ -16,15 +16,21 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+RULES_VERSION = "1.0"
+"""Версия правил из ТЗ; попадает в метаданные каждого отчёта (§12)."""
+
 __all__ = [
+    "RULES_VERSION",
     "AnalysisResult",
     "AuditLogEntry",
     "BalanceTrace",
@@ -403,6 +409,10 @@ class CategoryRecon(_Frozen):
     ``ratio = |нетто| / брутто``: 0 — чистый churn, 1 — односторонний сдвиг.
     Возвраты присутствуют в двух вариантах: «как есть» и «скорректировано»
     (за вычетом служебных записей §3.6).
+
+    Дневные ряды хранятся целиком (``acc_series``, ``ops_series``): они нужны
+    детектору лага §5.7.1 и календарной агрегации §5.7.3, которые работают с
+    самими рядами, а не с их разностью. Ряды упорядочены по дате.
     """
 
     category: Category
@@ -412,6 +422,8 @@ class CategoryRecon(_Frozen):
     gross: Decimal
     ratio: float | None
     days_with_difference: int
+    acc_series: tuple[tuple[date, Decimal], ...]
+    ops_series: tuple[tuple[date, Decimal], ...]
     daily_differences: tuple[tuple[date, Decimal], ...]
     adjusted_net: Decimal | None
     adjusted_gross: Decimal | None
@@ -808,6 +820,12 @@ class Config(_Frozen):
     Версионируется вместе с кодом; хеш конфига попадает в отчёт (§12).
     """
 
+    source_path: Path | None = None
+    """Откуда прочитан конфиг. Заполняется :func:`load_config`, не из YAML."""
+
+    source_sha256: str | None = None
+    """Хеш файла конфига — попадает в ``FileMeta`` каждого отчёта (§12)."""
+
     version: str
     cash_account: str
     target_balance: Decimal
@@ -824,8 +842,37 @@ class Config(_Frozen):
     calendar: CalendarConfig
 
 
+class _DecimalLoader(yaml.SafeLoader):
+    """YAML-загрузчик, поднимающий дробные скаляры как ``Decimal``.
+
+    Штатный ``SafeLoader`` отдаёт ``float``, и ``TOLERANCE: 0.005`` превращается
+    в двоичную дробь, не равную 0,005. Дальше это уезжает в допуск subset-sum
+    (§7.3) и в пороги свёртки (§5.7.2), где сравнение идёт по копейке.
+
+    Конструктор берёт **исходную строку** скаляра, поэтому значение в конфиге и
+    значение в памяти совпадают посимвольно.
+    """
+
+
+def _construct_decimal(loader: yaml.SafeLoader, node: yaml.ScalarNode) -> Decimal | float:
+    """Собрать ``Decimal`` из исходного текста скаляра — см. :class:`_DecimalLoader`."""
+    raw = loader.construct_scalar(node)
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        # .inf / .nan и прочие специальные значения YAML — отдаём штатному float.
+        return float(raw)
+
+
+_DecimalLoader.add_constructor("tag:yaml.org,2002:float", _construct_decimal)
+
+
 def load_config(path: Path) -> Config:
     """Загрузить и провалидировать YAML-конфиг §6.
+
+    Дробные значения читаются как :class:`~decimal.Decimal` (см.
+    :class:`_DecimalLoader`); поля, объявленные ``float``, пересчитываются
+    pydantic — там точность до копейки не нужна.
 
     Args:
         path: путь к ``config/default.yaml`` или пользовательскому конфигу.
@@ -834,15 +881,21 @@ def load_config(path: Path) -> Config:
         Разобранный :class:`Config`.
 
     Raises:
-        NotImplementedError: каркас, реализация — этап 1 (§14).
+        FileNotFoundError: конфига нет по указанному пути.
+        pydantic.ValidationError: конфиг не соответствует §6 — лишний ключ,
+            отсутствующая секция, неразбираемое значение.
     """
-    raise NotImplementedError
+    raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_DecimalLoader)  # noqa: S506
+    config = Config.model_validate(raw)
+    return config.model_copy(
+        update={"source_path": path, "source_sha256": config_sha256(path)},
+    )
 
 
 def config_sha256(path: Path) -> str:
     """Хеш конфига для метаданных отчёта — §12, «версионирование правил».
 
-    Raises:
-        NotImplementedError: каркас, реализация — этап 1 (§14).
+    Считается по байтам файла: в отчёт должно попадать то, что реально лежало на
+    диске, а не результат нормализации YAML.
     """
-    raise NotImplementedError
+    return hashlib.sha256(path.read_bytes()).hexdigest()

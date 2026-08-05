@@ -13,7 +13,10 @@ from pathlib import Path
 
 import typer
 
-from cashforensics.models import AnalysisResult, Config
+from cashforensics.ingest import ingest
+from cashforensics.models import AnalysisResult, Config, load_config
+from cashforensics.normalize import actual_period, normalize
+from cashforensics.validate import ValidationFailed, validate
 
 __all__ = ["analyze", "app", "batch", "explain", "main", "run_pipeline", "verify"]
 
@@ -100,10 +103,44 @@ def verify(
 ) -> None:
     """Только валидация §5.3 — контроли V1–V6 без остального конвейера.
 
-    Raises:
-        NotImplementedError: каркас, реализация — этап 1 (§14).
+    Печатает раскладку блоков опер-лога (§3.3), контрольные суммы карточки и
+    результат каждого контроля. Возвращает код 1, если нарушен жёсткий
+    инвариант V1–V3: разбор неполон, и дальнейший анализ дал бы правдоподобный,
+    но неверный результат (§5.3).
     """
-    raise NotImplementedError
+    settings = load_config(config)
+    ingested = ingest(file, settings)
+    normalized = normalize(ingested, settings)
+
+    typer.echo(f"Файл:     {file}")
+    typer.echo(f"ПВЗ:      {ingested.meta.pvz_id or '—'}")
+    typer.echo(f"Раскладка блоков: вариант {ingested.layout.variant}")
+    period = actual_period(normalized.ledger)
+    if period is not None:
+        typer.echo(f"Период фактический: {period[0]:%d.%m.%Y} — {period[1]:%d.%m.%Y}")
+    if ingested.meta.stated_period is not None:
+        stated = ingested.meta.stated_period
+        typer.echo(f"Период заявленный:  {stated[0]:%d.%m.%Y} — {stated[1]:%d.%m.%Y}")
+    typer.echo(f"Проводок 1С: {len(normalized.ledger)}, записей опер-лога: {len(normalized.ops)}")
+    typer.echo(f"Сальдо на начало: {normalized.totals.opening}")
+    typer.echo(f"Сальдо на конец:  {normalized.totals.closing_stated}")
+    typer.echo("")
+
+    try:
+        report = validate(normalized, settings)
+    except ValidationFailed as failure:
+        typer.echo(f"ОСТАНОВКА: {failure}", err=True)
+        raise typer.Exit(code=1) from failure
+
+    for check in report.checks:
+        mark = "пропущен" if check.skipped else ("ок" if check.passed else "НЕ ПРОЙДЕН")
+        typer.echo(f"{check.code} [{mark}] {check.message}")
+
+    if normalized.issues:
+        typer.echo("")
+        typer.echo(f"Не разобрано строк: {len(normalized.issues)}")
+        for issue in normalized.issues:
+            typer.echo(f"  строка {issue.row}: {issue.reason}")
 
 
 @app.command()

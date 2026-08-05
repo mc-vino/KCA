@@ -22,10 +22,8 @@
 from __future__ import annotations
 
 from cashforensics.cli import main
+from cashforensics.models import RULES_VERSION
 
 __all__ = ["RULES_VERSION", "__version__", "main"]
 
 __version__ = "0.1.0"
-
-RULES_VERSION = "1.0"
-"""Версия правил из ТЗ; попадает в метаданные каждого отчёта (§12)."""
