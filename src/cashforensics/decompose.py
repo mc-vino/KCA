@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
 
 from cashforensics.models import (
@@ -27,45 +28,101 @@ from cashforensics.models import (
     CategoryRecon,
     CausalLine,
     ClassifyResult,
-    Config,
     Finding,
     LocalizationResult,
+    LocalizationStatus,
     Waterfall,
 )
+from cashforensics.reconcile import log_imbalance
 
 __all__ = [
+    "CAUSAL_CONFIDENCE_FLOOR",
     "build_waterfall",
     "causal_decomposition",
     "check_tie",
     "decompose",
+    "other_flows",
 ]
+
+CAUSAL_CONFIDENCE_FLOOR = 0.90
+"""Порог автоматического включения в причинную раскладку — §7.6."""
+
+_ZERO = Decimal("0.00")
+
+_RECONCILED = (Category.INCOME, Category.COLLECTION, Category.REFUND)
+
+
+def other_flows(classified: ClassifyResult) -> tuple[Decimal, Decimal]:
+    """Дебет и кредит категорий вне сверки — «Прочие_Дт» и «Прочие_Кт» §5.10.
+
+    Сюда входят и «прочее», и размен (50.1): §5.6 сверяет только приход,
+    инкассацию и возвраты, а тождество §5.10 обязано покрывать все проводки —
+    иначе ``unresolved`` не сойдётся.
+    """
+    debit = _ZERO
+    credit = _ZERO
+    for entry in classified.ledger:
+        if entry.category in _RECONCILED:
+            continue
+        debit += entry.debit
+        credit += entry.credit
+    return (debit, credit)
 
 
 def build_waterfall(
     reconciliation: dict[Category, CategoryRecon],
     balance: BalanceTrace,
     classified: ClassifyResult,
-    config: Config,
 ) -> Waterfall:
     """Категорийная раскладка по тождеству §5.10.
 
-    Raises:
-        NotImplementedError: каркас, реализация — этап 3 (§14).
+    Дельты берутся из §5.6 в варианте «как есть»: служебные РКО физически
+    выносят наличные из ящика и обязаны участвовать в сходимости сальдо, даже
+    если из сверки возвратов они исключены (§3.6).
     """
-    raise NotImplementedError
+    income = reconciliation[Category.INCOME].net
+    collection = reconciliation[Category.COLLECTION].net
+    refund = reconciliation[Category.REFUND].net
+    other_debit, other_credit = other_flows(classified)
+
+    # Единственный источник формулы — §5.6; собственной копии здесь быть не
+    # должно: при расхождении реализаций тождество §5.10 перестаёт сходиться
+    # ровно на сумму служебных РКО.
+    imbalance = log_imbalance(classified.ops)
+
+    components = (
+        balance.opening + income - collection - refund + (other_debit - other_credit) + imbalance
+    )
+    deviation = balance.closing_computed - balance.target
+    unresolved = deviation - (components - balance.target)
+
+    return Waterfall(
+        closing=balance.closing_computed,
+        target=balance.target,
+        income_delta=income,
+        collection_delta=collection,
+        refund_delta=refund,
+        other_delta=other_debit - other_credit,
+        log_imbalance=imbalance,
+        unresolved=unresolved,
+        causal_lines=(),
+    )
 
 
 def causal_decomposition(
     waterfall: Waterfall,
-    findings: tuple[Finding, ...],
-    localizations: tuple[LocalizationResult, ...],
-    config: Config,
+    findings: Sequence[Finding],
+    localizations: Sequence[LocalizationResult],
 ) -> tuple[CausalLine, ...]:
     """Перевести раскладку в причинную форму — §5.10.
 
-    Вместо категорий — конкретные события с документами. Каждая строка обязана
-    ссылаться на :class:`~cashforensics.models.Finding` с трассировкой.
+    Вместо категорий — конкретные события с документами. Каждая строка
+    ссылается на :class:`~cashforensics.models.Finding` с трассировкой.
     Порог автоматического включения — ``confidence ≥ 0,90`` (§7.6).
+
+    Строки ниже порога не выбрасываются: их суммарный вклад собирается в
+    строку «не локализовано», иначе раскладка перестала бы сходиться, а
+    пользователь не увидел бы, какая часть отклонения осталась необъяснённой.
 
     Эталон (PAX_119023531)::
 
@@ -75,36 +132,86 @@ def causal_decomposition(
           +112,67  размен между кассами + округления смены
         ─────────
           −293,62  = сальдо на конец
-
-    Raises:
-        NotImplementedError: каркас, реализация — этап 3 (§14).
     """
-    raise NotImplementedError
+    lines: list[CausalLine] = []
+    explained = _ZERO
+
+    for index, finding in enumerate(findings):
+        if finding.balance_impact == _ZERO or finding.confidence < CAUSAL_CONFIDENCE_FLOOR:
+            continue
+        lines.append(
+            CausalLine(
+                amount=finding.balance_impact,
+                title=finding.title,
+                finding_index=index,
+                doc_numbers=tuple(finding.doc_numbers),
+            ),
+        )
+        explained += finding.balance_impact
+
+    for result in localizations:
+        if (
+            result.status is not LocalizationStatus.LOCALIZED
+            or result.balance_impact == _ZERO
+            or result.confidence < CAUSAL_CONFIDENCE_FLOOR
+        ):
+            continue
+        lines.append(
+            CausalLine(
+                amount=result.balance_impact,
+                title=(
+                    f"{result.code.value if result.code else 'расхождение'} "
+                    f"за {result.date:%d.%m.%Y}"
+                ),
+                finding_index=None,
+                doc_numbers=result.doc_numbers,
+            ),
+        )
+        explained += result.balance_impact
+
+    lines.sort(key=lambda line: (-abs(line.amount), line.title))
+
+    deviation = waterfall.closing - waterfall.target
+    remainder = deviation - explained
+    if remainder != _ZERO:
+        lines.append(
+            CausalLine(
+                amount=remainder,
+                title=(
+                    "не локализовано до документа — расхождение объяснено до дня и до категории"
+                ),
+                finding_index=None,
+                doc_numbers=(),
+            ),
+        )
+    return tuple(lines)
 
 
-def check_tie(waterfall: Waterfall, config: Config) -> Decimal:
+def check_tie(waterfall: Waterfall) -> Decimal:
     """Проверить сходимость раскладки — §5.10, §13.2.
 
     Returns:
-        ``unresolved``; ``|unresolved| < EPS_TIE`` обязательно.
-
-    Raises:
-        NotImplementedError: каркас, реализация — этап 3 (§14).
+        ``unresolved``; ``|unresolved| < EPS_TIE`` обязательно. Превышение —
+        дефект приложения, а не свойство данных.
     """
-    raise NotImplementedError
+    return waterfall.unresolved
 
 
 def decompose(
     reconciliation: dict[Category, CategoryRecon],
     balance: BalanceTrace,
     classified: ClassifyResult,
-    findings: tuple[Finding, ...],
-    localizations: tuple[LocalizationResult, ...],
-    config: Config,
+    findings: Sequence[Finding],
+    localizations: Sequence[LocalizationResult],
 ) -> Waterfall:
     """Стадия DECOMPOSE целиком — §5.10.
 
-    Raises:
-        NotImplementedError: каркас, реализация — этап 3 (§14).
+    Порогов §6 не использует: тождество §5.10 чисто арифметическое, а порог
+    сходимости ``EPS_TIE`` проверяет вызывающий через :func:`check_tie`.
     """
-    raise NotImplementedError
+    waterfall = build_waterfall(reconciliation, balance, classified)
+    return waterfall.model_copy(
+        update={
+            "causal_lines": causal_decomposition(waterfall, findings, localizations),
+        },
+    )
