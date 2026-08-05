@@ -550,6 +550,14 @@ class SubsetSumGateReport(_Frozen):
     """
 
     candidate_count: int
+    solutions_found: int
+    """Сколько подмножеств попало в допуск.
+
+    Отличает «решений нет» от «решений несколько»: первое — не неоднозначность,
+    а отсутствие объяснения, и статус у них разный (``NOT_LOCALIZED`` против
+    ``AMBIGUOUS``).
+    """
+
     gate_count_passed: bool
     gate_unique_passed: bool
     gate_density_passed: bool
@@ -562,17 +570,28 @@ class SubsetSumGateReport(_Frozen):
 
 
 class LocalizationResult(_Frozen):
-    """Результат локализации одного проблемного дня/окна — §5.9."""
+    """Результат локализации одного проблемного дня/окна — §5.9.
+
+    ``code`` — находка §8, к которой сводится результат; ``None`` для отказов:
+    у отказа нет находки, есть причина в ``explanation`` и протокол в
+    ``gates`` (§0.3).
+
+    ``balance_impact`` отделён от ``amount`` намеренно (§4.3): выдача без
+    проводки на сальдо не влияет, потому что этой проводки в 1С нет вовсе.
+    """
 
     date: date
     category: Category
     mode: PostingMode
     status: LocalizationStatus
+    code: FindingCode | None
     amount: Decimal
+    balance_impact: Decimal
     ledger_rows: tuple[int, ...]
     ops_rows: tuple[int, ...]
     doc_numbers: tuple[str, ...]
     gates: SubsetSumGateReport | None
+    confidence: float
     explanation: str
 
 
