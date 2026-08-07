@@ -350,7 +350,9 @@ def run_timing(
 
     for category, recon in reconciliation.items():
         acc = _as_series(recon.acc_series)
-        ops = _as_series(recon.ops_series)
+        # Сверяемый ряд, а не «как есть»: детектор лага §5.7.1 и календарная
+        # агрегация §5.7.3 обязаны видеть то же, что свёртка и локализация.
+        ops = _as_series(recon.reconciled_ops_series())
         collapse = collapse_timing(recon.daily_differences, config, enabled=enabled)
         result[category] = collapse.model_copy(
             update={

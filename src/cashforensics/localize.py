@@ -597,7 +597,19 @@ def _localize_day(
     config: Config,
     pool_kopecks: Sequence[int] = (),
 ) -> list[LocalizationResult]:
-    """Локализовать один проблемный день — §5.9.3, §5.9.4, §7.4.
+    """Локализовать один проблемный день — §5.9.2, §5.9.3, §5.9.4, §7.4.
+
+    Порядок §14: **сопоставление 1:1 → правило единственной проводки →
+    subset-sum с гейтами**. Первый шаг обязателен и не является оптимизацией:
+    пока он пропускался, день 06.12.2025 Солигорска с проводками 2 493,51 и
+    80,83 при выдаче 80,83 в логе не разбирался вовсе — «проводок две, правило
+    §5.9.3 неприменимо», — хотя после снятия очевидной пары остаётся ровно одна
+    проводка и избыток 2 075,31 приписывается ей. Это четвёртый из четырёх
+    завышенных РКО эталона §11.3; без сопоставления он терялся.
+
+    Снятие пар меняет и обратную сторону: из кандидатов subset-sum уходят
+    выдачи, у которых проводка есть, — это и сужает перебор, и убирает
+    дубликаты сумм, на которых закрывался гейт уникальности §7.3.
 
     ``pool_kopecks`` — эмпирическое распределение сумм за период; нужно гейту 4
     (§7.3), чтобы нуль-модель не вырождалась на суммах самого дня.
@@ -606,7 +618,23 @@ def _localize_day(
     ops_total = _sum(operations)
     diff = acc - ops_total
 
-    # Выдачи есть, проводок нет вовсе (§8, PAYOUT_NOT_BOOKED).
+    # §5.9.2 — снять однозначные пары «проводка = выдача». Разница дня от этого
+    # не меняется: из обеих частей уходит одна и та же сумма.
+    paired = greedy_match(postings, operations, config)
+    matched_ledger = {ledger_row for ledger_row, _ in paired}
+    matched_ops = {ops_row for _, ops_row in paired}
+    postings = [entry for entry in postings if entry.row not in matched_ledger]
+    operations = [entry for entry in operations if entry.row not in matched_ops]
+
+    # После снятия пар обе части уменьшились на одну и ту же сумму, поэтому
+    # ``diff`` не изменился и остаётся разницей дня.
+    unpaired_acc = _sum(postings)
+    unpaired_ops = _sum(operations)
+    paired_note = (
+        f" Снято {len(paired)} однозначных пар «проводка = выдача» (§5.9.2)." if paired else ""
+    )
+
+    # Выдачи есть, проводок к ним нет (§8, PAYOUT_NOT_BOOKED).
     # balance_impact = 0: этих проводок в 1С нет, на сальдо они не влияют (§4.3).
     if not postings and operations:
         return [
@@ -616,12 +644,12 @@ def _localize_day(
                 mode,
                 LocalizationStatus.LOCALIZED,
                 FindingCode.PAYOUT_NOT_BOOKED,
-                ops_total,
+                unpaired_ops,
                 _ZERO,
                 (
                     f"За {day:%d.%m.%Y} в опер-логе {len(operations)} выдач на "
-                    f"{ops_total}, проводок этой категории в 1С нет вовсе. "
-                    "На сальдо не влияет: пробел контроля, а не причина отклонения."
+                    f"{unpaired_ops}, проводок к ним в 1С нет. На сальдо не влияет: "
+                    f"пробел контроля, а не причина отклонения.{paired_note}"
                 ),
                 ops_rows=tuple(entry.row for entry in operations),
             ),
@@ -636,12 +664,13 @@ def _localize_day(
                 mode,
                 LocalizationStatus.LOCALIZED,
                 FindingCode.RKO_WITHOUT_PAYOUT,
-                acc,
-                acc,
+                unpaired_acc,
+                unpaired_acc,
                 (
                     f"За {day:%d.%m.%Y} в 1С проведено {len(postings)} документов на "
-                    f"{acc}, в опер-логе выдач нет. Требует проверки: инструмент не "
-                    "может сказать, какая из двух систем права (§16)."
+                    f"{unpaired_acc}, выдач по ним в опер-логе нет. Требует проверки: "
+                    f"инструмент не может сказать, какая из двух систем права (§16)."
+                    f"{paired_note}"
                 ),
                 ledger_rows=tuple(entry.row for entry in postings),
                 doc_numbers=tuple(entry.doc_number for entry in postings if entry.doc_number),
@@ -670,9 +699,10 @@ def _localize_day(
                 diff,
                 (
                     f"{posting.doc_text or 'документ'} от {day:%d.%m.%Y}: в 1С "
-                    f"{acc}, в опер-логе за день {ops_total} "
+                    f"{unpaired_acc}, в опер-логе без пары {unpaired_ops} "
                     f"({len(operations)} записей). Расхождение {abs(diff)} "
-                    "приписано единственной проводке дня — иных кандидатов нет."
+                    "приписано единственной несопоставленной проводке дня — иных "
+                    f"кандидатов нет.{paired_note}"
                 ),
                 ledger_rows=(posting.row,),
                 ops_rows=tuple(entry.row for entry in operations),

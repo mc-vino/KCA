@@ -413,6 +413,14 @@ class CategoryRecon(_Frozen):
     Дневные ряды хранятся целиком (``acc_series``, ``ops_series``): они нужны
     детектору лага §5.7.1 и календарной агрегации §5.7.3, которые работают с
     самими рядами, а не с их разностью. Ряды упорядочены по дате.
+
+    **Какой ряд считается сверяемым.** ``ops_series`` — вариант «как есть»,
+    ``ops_series_adjusted`` — «скорректировано» (§3.6). Сверка ведётся по
+    :meth:`reconciled_ops_series`: служебной выдаче в 1С не соответствует
+    проводки по определению, поэтому включать её в расхождение значило бы
+    объявить расхождением заведомо мнимое (§5.6). Стадии §5.7 и §5.9 обязаны
+    брать один и тот же ряд — иначе свёртка оставляет день в остатке, а
+    локализация не находит на нём ничего.
     """
 
     category: Category
@@ -424,9 +432,14 @@ class CategoryRecon(_Frozen):
     days_with_difference: int
     acc_series: tuple[tuple[date, Decimal], ...]
     ops_series: tuple[tuple[date, Decimal], ...]
+    ops_series_adjusted: tuple[tuple[date, Decimal], ...] | None = None
     daily_differences: tuple[tuple[date, Decimal], ...]
     adjusted_net: Decimal | None
     adjusted_gross: Decimal | None
+
+    def reconciled_ops_series(self) -> tuple[tuple[date, Decimal], ...]:
+        """Ряд опер-лога, по которому ведётся сверка — §5.6, §3.6."""
+        return self.ops_series if self.ops_series_adjusted is None else self.ops_series_adjusted
 
 
 # --------------------------------------------------------------------------- #

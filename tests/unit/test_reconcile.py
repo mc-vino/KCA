@@ -209,6 +209,34 @@ class TestCategoryReconciliation:
         assert recon.net == Decimal("-11610.00")
         assert recon.adjusted_net == ZERO
 
+    def test_reconciled_series_excludes_service(self, config: Config) -> None:
+        """§3.6: сверка ведётся по «скорректированному» ряду, а не «как есть».
+
+        Ловушка, стоившая пяти ложных дней на Солигорске: §5.7 сворачивала ряд
+        «как есть», а §5.9 разбирала день по «скорректированному». День, попавший
+        в остаток только из-за судебной выплаты, приходил в локализацию с нулевой
+        разницей и оседал в отчёте строкой «не локализовано» на 0,00.
+        """
+        ledger = (_refund_posting(1, date(2024, 2, 1), Decimal("200.00")),)
+        ops = (
+            _ops(10, datetime(2024, 2, 1, 10, 0, 0), Decimal("200.00"), OpsClass.REFUND),
+            _ops(11, datetime(2024, 2, 1, 11, 0, 0), Decimal("11310.00"), OpsClass.SERVICE),
+        )
+
+        recon = reconcile(_classified(ledger, ops), _no_reversals(), config)[Category.REFUND]
+
+        assert recon.daily_differences == ()
+        assert recon.reconciled_ops_series() == ((date(2024, 2, 1), Decimal("200.00")),)
+        assert recon.ops_series == ((date(2024, 2, 1), Decimal("11510.00")),)
+
+    def test_reconciled_series_is_the_raw_one_outside_refunds(self, config: Config) -> None:
+        ledger = (_income(1, date(2024, 2, 1), Decimal("100.00")),)
+
+        recon = reconcile(_classified(ledger), _no_reversals(), config)[Category.INCOME]
+
+        assert recon.ops_series_adjusted is None
+        assert recon.reconciled_ops_series() == recon.ops_series
+
     def test_adjusted_is_none_for_non_refund_categories(self, config: Config) -> None:
         ledger = (_income(1, date(2024, 2, 1), Decimal("100.00")),)
 

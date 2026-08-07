@@ -243,6 +243,58 @@ class TestSinglePostingRule:
         assert result.ledger_rows == (987,)
         assert result.gates is None
 
+    def test_rule_applies_after_pairs_are_removed(self, config: Config) -> None:
+        """§14: сопоставление 1:1 идёт **до** правила единственной проводки.
+
+        Форма 06.12.2025 Солигорска: в 1С проводки 2 493,51 и 80,83, в логе
+        выдача 80,83 и ещё четыре на 418,20. Пока пары не снимались, день
+        отбрасывался как «проводок две, §5.9.3 неприменимо», и четвёртый из
+        четырёх завышенных РКО эталона §11.3 терялся. После снятия очевидной
+        пары остаётся ровно одна проводка, и избыток 2 075,31 её.
+        """
+        ledger = (
+            _refund_posting(20235, Decimal("2493.51")),
+            _refund_posting(20238, Decimal("80.83")),
+        )
+        ops = (
+            _payout(100, Decimal("10.36")),
+            _payout(101, Decimal("288.00")),
+            _payout(102, Decimal("75.00")),
+            _payout(103, Decimal("44.84")),
+            _payout(104, Decimal("80.83")),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("2075.31")),)),
+            config,
+        )
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.code is FindingCode.RKO_OVERSTATED
+        assert result.amount == Decimal("2075.31")
+        assert result.ledger_rows == (20235,)
+        assert result.gates is None
+
+    def test_paired_payout_is_not_reported_as_unbooked(self, config: Config) -> None:
+        """Снятая пара уходит из кандидатов: выдача 80,83 проведена (§5.9.2)."""
+        ledger = (
+            _refund_posting(1, Decimal("2493.51")),
+            _refund_posting(2, Decimal("80.83")),
+        )
+        ops = (_payout(100, Decimal("80.83")), _payout(101, Decimal("418.20")))
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("2075.31")),)),
+            config,
+        )
+
+        assert 100 not in results[0].ops_rows
+
     def test_rule_does_not_apply_when_payouts_exceed_posting(self, config: Config) -> None:
         """Выдач больше, чем проведено — проводка не завышена (§5.9.3).
 

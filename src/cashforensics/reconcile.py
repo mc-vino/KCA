@@ -137,22 +137,34 @@ def reconcile_category(
     """Сверка одной категории — §5.6."""
     acc = daily_ledger_series(classified.ledger, category, reversals.neutralized_rows)
     ops = daily_ops_series(classified.ops, category, exclude_service=False)
-    differences = daily_differences(acc, ops)
 
     acc_total = sum(acc.values(), _ZERO)
     ops_total = sum(ops.values(), _ZERO)
     net = acc_total - ops_total
-    gross = sum((abs(diff) for _, diff in differences), _ZERO)
+    gross = sum((abs(diff) for _, diff in daily_differences(acc, ops)), _ZERO)
 
+    # Сверяемый ряд — «скорректированный», где он есть (§3.6). Служебной выдаче
+    # проводки 1С не соответствует по определению, и считать её расхождением
+    # значит объявить расхождением заведомо мнимое. Вариант «как есть» остаётся
+    # в отчёте: разница между ними и есть мера мнимого расхождения (§5.6).
+    #
+    # Ловушка, стоившая пяти ложных дней на Солигорске: §5.7 сворачивала ряд
+    # «как есть», а §5.9 разбирала день по «скорректированному». Дни, попавшие
+    # в остаток только из-за судебной выплаты 11 310,00, приходили в
+    # локализацию с нулевой разницей и оседали в отчёте как «не локализовано».
+    adjusted_series: dict[date, Decimal] | None = None
     adjusted_net: Decimal | None = None
     adjusted_gross: Decimal | None = None
     if category is Category.REFUND:
-        adjusted_ops = daily_ops_series(classified.ops, category, exclude_service=True)
-        adjusted_net = acc_total - sum(adjusted_ops.values(), _ZERO)
+        adjusted_series = daily_ops_series(classified.ops, category, exclude_service=True)
+        adjusted_net = acc_total - sum(adjusted_series.values(), _ZERO)
         adjusted_gross = sum(
-            (abs(diff) for _, diff in daily_differences(acc, adjusted_ops)),
+            (abs(diff) for _, diff in daily_differences(acc, adjusted_series)),
             _ZERO,
         )
+
+    reconciled = ops if adjusted_series is None else adjusted_series
+    differences = daily_differences(acc, reconciled)
 
     return CategoryRecon(
         category=category,
@@ -166,6 +178,7 @@ def reconcile_category(
         ),
         acc_series=series_to_pairs(acc),
         ops_series=series_to_pairs(ops),
+        ops_series_adjusted=(None if adjusted_series is None else series_to_pairs(adjusted_series)),
         daily_differences=differences,
         adjusted_net=adjusted_net,
         adjusted_gross=adjusted_gross,
