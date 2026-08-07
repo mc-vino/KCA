@@ -588,6 +588,98 @@ def _result(
     )
 
 
+def _one_sided_result(
+    day: date,
+    category: Category,
+    mode: PostingMode,
+    postings: Sequence[LedgerEntry],
+    operations: Sequence[OpsEntry],
+    reversed_rows: Sequence[int],
+    paired_note: str,
+) -> LocalizationResult | None:
+    """День, где после сопоставления пуста одна из сторон — §8, §4.3.
+
+    ``None`` — обе стороны непусты, разбирать день дальше (§5.9.3, §5.9.4).
+    Порядок веток важен: сначала «проводку сторнировали», и только потом
+    «проводки не было вовсе».
+    """
+    unpaired_acc = _sum(postings)
+    unpaired_ops = _sum(operations)
+
+    # День остался без проводок только потому, что §5.5 сняла сторно-пару.
+    # Проводка тут была — её сторнировали и не перепровели, — поэтому
+    # PAYOUT_NOT_BOOKED неприменим: §4.3 требует «этих проводок в 1С нет вовсе»
+    # и ``balance_impact = 0``, а у сторно без перепроведения влияние на сальдо
+    # как раз ненулевое, и §5.5 уже назвала эти рубли.
+    #
+    # Ловушка Солигорска: РКО 00231245 на 1 046,75 от 29.06.2023 сторнирован
+    # 01.10.2023 записью «Корректировка записей регистров 999» (R7991 ↔ R9106).
+    # Обе строки нейтрализованы, день 29.06 остался с восемью выдачами и без
+    # проводок, и те же 1 046,75 попадали в отчёт дважды: как
+    # REVERSAL_WITHOUT_REBOOK со влиянием на сальдо и как восемь
+    # «непроведённых выдач» с нулевым влиянием.
+    if not postings and operations and reversed_rows:
+        rows = ", ".join(str(row) for row in sorted(reversed_rows))
+        return _result(
+            day,
+            category,
+            mode,
+            LocalizationStatus.EXPLAINED_BY_REVERSAL,
+            None,
+            unpaired_ops,
+            _ZERO,
+            (
+                f"За {day:%d.%m.%Y} в опер-логе {len(operations)} выдач на "
+                f"{unpaired_ops}, а проводки дня сняты как сторно-пара §5.5 "
+                f"(строки {rows}). Расхождение дня принадлежит находке §5.5 и "
+                "отдельным кодом §8 не дублируется."
+            ),
+            ledger_rows=tuple(sorted(reversed_rows)),
+            ops_rows=tuple(entry.row for entry in operations),
+        )
+
+    # Выдачи есть, проводок к ним нет (§8, PAYOUT_NOT_BOOKED).
+    # balance_impact = 0: этих проводок в 1С нет, на сальдо они не влияют (§4.3).
+    if not postings and operations:
+        return _result(
+            day,
+            category,
+            mode,
+            LocalizationStatus.LOCALIZED,
+            FindingCode.PAYOUT_NOT_BOOKED,
+            unpaired_ops,
+            _ZERO,
+            (
+                f"За {day:%d.%m.%Y} в опер-логе {len(operations)} выдач на "
+                f"{unpaired_ops}, проводок к ним в 1С нет. На сальдо не влияет: "
+                f"пробел контроля, а не причина отклонения.{paired_note}"
+            ),
+            ops_rows=tuple(entry.row for entry in operations),
+        )
+
+    # Проводка есть, выдач в логе нет (§8, RKO_WITHOUT_PAYOUT).
+    if postings and not operations:
+        return _result(
+            day,
+            category,
+            mode,
+            LocalizationStatus.LOCALIZED,
+            FindingCode.RKO_WITHOUT_PAYOUT,
+            unpaired_acc,
+            unpaired_acc,
+            (
+                f"За {day:%d.%m.%Y} в 1С проведено {len(postings)} документов на "
+                f"{unpaired_acc}, выдач по ним в опер-логе нет. Требует проверки: "
+                f"инструмент не может сказать, какая из двух систем права (§16)."
+                f"{paired_note}"
+            ),
+            ledger_rows=tuple(entry.row for entry in postings),
+            doc_numbers=tuple(entry.doc_number for entry in postings if entry.doc_number),
+        )
+
+    return None
+
+
 def _localize_day(
     day: date,
     category: Category,
@@ -596,6 +688,7 @@ def _localize_day(
     operations: Sequence[OpsEntry],
     config: Config,
     pool_kopecks: Sequence[int] = (),
+    reversed_rows: Sequence[int] = (),
 ) -> list[LocalizationResult]:
     """Локализовать один проблемный день — §5.9.2, §5.9.3, §5.9.4, §7.4.
 
@@ -634,48 +727,17 @@ def _localize_day(
         f" Снято {len(paired)} однозначных пар «проводка = выдача» (§5.9.2)." if paired else ""
     )
 
-    # Выдачи есть, проводок к ним нет (§8, PAYOUT_NOT_BOOKED).
-    # balance_impact = 0: этих проводок в 1С нет, на сальдо они не влияют (§4.3).
-    if not postings and operations:
-        return [
-            _result(
-                day,
-                category,
-                mode,
-                LocalizationStatus.LOCALIZED,
-                FindingCode.PAYOUT_NOT_BOOKED,
-                unpaired_ops,
-                _ZERO,
-                (
-                    f"За {day:%d.%m.%Y} в опер-логе {len(operations)} выдач на "
-                    f"{unpaired_ops}, проводок к ним в 1С нет. На сальдо не влияет: "
-                    f"пробел контроля, а не причина отклонения.{paired_note}"
-                ),
-                ops_rows=tuple(entry.row for entry in operations),
-            ),
-        ]
-
-    # Проводка есть, выдач в логе нет (§8, RKO_WITHOUT_PAYOUT).
-    if postings and not operations:
-        return [
-            _result(
-                day,
-                category,
-                mode,
-                LocalizationStatus.LOCALIZED,
-                FindingCode.RKO_WITHOUT_PAYOUT,
-                unpaired_acc,
-                unpaired_acc,
-                (
-                    f"За {day:%d.%m.%Y} в 1С проведено {len(postings)} документов на "
-                    f"{unpaired_acc}, выдач по ним в опер-логе нет. Требует проверки: "
-                    f"инструмент не может сказать, какая из двух систем права (§16)."
-                    f"{paired_note}"
-                ),
-                ledger_rows=tuple(entry.row for entry in postings),
-                doc_numbers=tuple(entry.doc_number for entry in postings if entry.doc_number),
-            ),
-        ]
+    one_sided = _one_sided_result(
+        day,
+        category,
+        mode,
+        postings,
+        operations,
+        reversed_rows,
+        paired_note,
+    )
+    if one_sided is not None:
+        return [one_sided]
 
     # Правило единственной проводки — §5.9.3. Комбинаторики не требует, поэтому
     # гейты §7 к нему неприменимы: это самый сильный тип локализации.
@@ -841,6 +903,12 @@ def localize(
         )
         # Пул периода для гейта 4 §7.3 — суммы всех выдач категории.
         pool = [to_kopecks(entry.amount) for bucket in by_ops.values() for entry in bucket]
+        # Снятые §5.5 проводки по дням: день без проводок нужно уметь отличить
+        # от дня, у которого проводку сторнировали (§4.3).
+        reversed_by_day: dict[date, list[int]] = defaultdict(list)
+        for entry in classified.ledger:
+            if entry.category is category and entry.row in reversals.neutralized_rows:
+                reversed_by_day[entry.date].append(entry.row)
         for day, _diff in collapse.residual_days:
             results.extend(
                 _localize_day(
@@ -851,6 +919,7 @@ def localize(
                     by_ops.get(day, []),
                     config,
                     pool,
+                    reversed_by_day.get(day, []),
                 ),
             )
 

@@ -19,7 +19,7 @@ from cashforensics.classify import BlockClassificationFailed, classify
 from cashforensics.decompose import check_tie, decompose
 from cashforensics.ingest import ingest
 from cashforensics.localize import localize
-from cashforensics.models import AnalysisResult, Config, load_config
+from cashforensics.models import AnalysisResult, Config, LocalizationStatus, load_config
 from cashforensics.normalize import actual_period, normalize
 from cashforensics.rank import collect_findings, rank_findings
 from cashforensics.reconcile import reconcile
@@ -194,8 +194,14 @@ def analyze(
     typer.echo(f"Сальдо: {result.waterfall.closing}  (целевое {result.waterfall.target})")
     typer.echo(f"Несведённый остаток: {result.unresolved}")
     typer.echo(f"Находок: {len(result.findings)}, сигнатур: {len(result.signatures)}")
-    localized = sum(1 for item in result.localizations if item.code is not None)
-    typer.echo(f"Локализовано: {localized} из {len(result.localizations)} расхождений")
+    # День, объяснённый сторно §5.5, тоже разобран: своего кода §8 у него нет,
+    # но нелокализованным расхождением он не является.
+    explained = sum(
+        1
+        for item in result.localizations
+        if item.code is not None or item.status is LocalizationStatus.EXPLAINED_BY_REVERSAL
+    )
+    typer.echo(f"Локализовано: {explained} из {len(result.localizations)} расхождений")
     for path in written:
         typer.echo(f"Отчёт: {path}")
 

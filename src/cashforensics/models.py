@@ -178,11 +178,16 @@ class LocalizationStatus(StrEnum):
 
     ``NOT_LOCALIZED`` и ``REFUSED_*`` реализуют принцип «отказ вместо догадки»
     (§0.3): недоказанная улика хуже отсутствия результата.
+
+    ``EXPLAINED_BY_REVERSAL`` — день объяснён, но своего кода §8 не имеет:
+    расхождение целиком принадлежит находке §5.5, и второй раз называть те же
+    рубли нельзя.
     """
 
     LOCALIZED = "ЛОКАЛИЗОВАНО"
     PROBABLE = "ВЕРОЯТНО"
     AMBIGUOUS = "AMBIGUOUS"
+    EXPLAINED_BY_REVERSAL = "ОБЪЯСНЕНО_СТОРНО"
     NOT_LOCALIZED = "НЕ_ЛОКАЛИЗОВАНО"
     REFUSED_CANDIDATE_COUNT = "ОТКАЗ_ЧИСЛО_КАНДИДАТОВ"
     REFUSED_DENSITY = "ОТКАЗ_ПЛОТНОСТЬ"

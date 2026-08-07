@@ -19,6 +19,7 @@ from cashforensics.models import (
     Config,
     Finding,
     FindingCode,
+    LedgerEntry,
     LocalizationResult,
     Materiality,
     MaterialityThresholds,
@@ -463,6 +464,121 @@ def _context_findings(
     return findings
 
 
+def _posted_amount(posting: LedgerEntry | None) -> Decimal:
+    """Сумма проводки независимо от стороны — §4.1. ``None`` даёт ноль."""
+    return _ZERO if posting is None else posting.debit + posting.credit
+
+
+def _posting_delay_findings(
+    localizations: Sequence[LocalizationResult],
+    classified: ClassifyResult,
+    thresholds: MaterialityThresholds,
+) -> list[Finding]:
+    """Проведение задним числом — §8, ``POSTING_DELAY``.
+
+    §8 задаёт способ обнаружения как «сопоставление дат документа»: выдача без
+    проводки в свой день и проводка без выдачи в более поздний день, совпадающие
+    по сумме до копейки, — это одна и та же операция, проведённая с задержкой, а
+    не два независимых пробела контроля.
+
+    Свёртка §5.7.2 такую пару не видит: перенос даты ограничен ``LONG_WIN``
+    (31 день), а здесь задержка достигает 175 дней. Расширять окно нельзя —
+    §5.7.2 держит его узким именно потому, что точное совпадение сумм на большом
+    горизонте начинает сводить случайные операции. Поэтому находка не заменяет
+    исходные две, а связывает их: читатель видит, что одни и те же рубли названы
+    дважды, и не складывает их.
+
+    Солигорск: 01.10.2023 проведены РКО 00289603 (38,27), 00289605 (329,26) и
+    00290339 (57,66) — выдачи 09.04, 19.04 и 27.06.2023, задержка 96–175 дней.
+    Признак ищется **по суммам, а не по номерам документов.** Номера говорят
+    больше: все три документа отмечены временем 23:59:59, а их номера лежат в
+    диапазоне начала ноября 2023 — проводки не только опоздали, но и датированы
+    задним числом. Построить на нумерации правило не удалось: документы одной
+    ретро-сессии идут подряд и маскируют друг друга (сосед по номеру у
+    back-dated документа — такой же back-dated), а ряд ПКО этой кассы вообще не
+    монотонен — 2022 и 2023 годы делят один диапазон номеров и дают 95
+    инверсий. Правило, работающее на одной сессии и промахивающееся на соседнем
+    ряду, — догадка, а не признак (§8.2, §15).
+
+    Порядок обхода полный и явный (§12): по дате выдачи, затем по сумме, затем
+    по первой строке лога; проводка расходуется не более одного раза.
+    """
+    entry_by_row = {entry.row: entry for entry in classified.ledger}
+    unbooked = sorted(
+        (item for item in localizations if item.code is FindingCode.PAYOUT_NOT_BOOKED),
+        key=lambda item: (item.date, item.amount, item.ops_rows),
+    )
+    late_postings = sorted(
+        (
+            (item.date, row)
+            for item in localizations
+            if item.code is FindingCode.RKO_WITHOUT_PAYOUT
+            for row in item.ledger_rows
+        ),
+        key=lambda pair: (pair[0], pair[1]),
+    )
+
+    taken: set[int] = set()
+    findings: list[Finding] = []
+    for payout in unbooked:
+        match = next(
+            (
+                pair
+                for pair in late_postings
+                if pair[1] not in taken
+                and pair[0] > payout.date
+                and _posted_amount(entry_by_row.get(pair[1])) == payout.amount
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        booked_on, row = match
+        taken.add(row)
+        posting = entry_by_row[row]
+        amount = _posted_amount(posting)
+        delay = (booked_on - payout.date).days
+        stamp = str(posting.doc_text)[-8:]
+        backdated = (
+            f" Документ отмечен временем {stamp} — типичная метка ретро-сессии (§8)."
+            if stamp == "23:59:59"
+            else ""
+        )
+        findings.append(
+            Finding(
+                code=FindingCode.POSTING_DELAY,
+                severity=CODE_SEVERITY[FindingCode.POSTING_DELAY],
+                date=(payout.date, booked_on),
+                amount=amount,
+                ledger_rows=[row],
+                ops_rows=list(payout.ops_rows),
+                doc_numbers=[posting.doc_number] if posting.doc_number else [],
+                title=f"Проводка на {amount} отстала от выдачи на {delay} дн.",
+                explanation=(
+                    f"Выдача {amount} от {payout.date:%d.%m.%Y} проведена в 1С только "
+                    f"{booked_on:%d.%m.%Y} документом {posting.doc_number or '—'} "
+                    f"(строка {row}) — задержка {delay} дней.{backdated} "
+                    "Свёртка §5.7.2 такую пару не сводит: перенос даты ограничен "
+                    "31 днём. Те же рубли поэтому названы в отчёте дважды — "
+                    "«выдача без проводки» за день выдачи и «проводка без выдачи» за "
+                    "день проведения; складывать их нельзя. На сальдо не влияет: "
+                    "операция проведена, вопрос только в дате."
+                ),
+                evidence={
+                    "rule": "§8 POSTING_DELAY, сопоставление дат документа",
+                    "doc_time": stamp,
+                    "paid_on": payout.date.isoformat(),
+                    "booked_on": booked_on.isoformat(),
+                    "delay_days": delay,
+                },
+                confidence=CONFIDENCE_LOCALIZED,
+                materiality=finding_materiality(amount, _ZERO, thresholds),
+                balance_impact=_ZERO,
+            ),
+        )
+    return findings
+
+
 def collect_findings(
     reversal_findings: Sequence[Finding],
     localizations: Sequence[LocalizationResult],
@@ -498,6 +614,7 @@ def collect_findings(
         ),
         *(_signature_finding(item, period, thresholds) for item in signatures),
         *_context_findings(classified, validation, waterfall, period, thresholds),
+        *_posting_delay_findings(localizations, classified, thresholds),
     ]
     return tuple(findings)
 

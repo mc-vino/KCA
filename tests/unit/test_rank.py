@@ -47,6 +47,7 @@ from cashforensics.rank import (
     rank_findings,
     sort_key,
 )
+from tests.unit.test_classify import ledger_entry
 
 pytestmark = pytest.mark.unit
 
@@ -416,6 +417,123 @@ class TestCollectFindings:
         )
         assert findings[0].code is FindingCode.PERIOD_CUTOFF
         assert findings[0].balance_impact == ZERO
+
+    def test_late_booking_becomes_posting_delay(self, config: Config) -> None:
+        """§8 ``POSTING_DELAY``: выдача и её проводка разнесены на месяцы.
+
+        Ловушка Солигорска: выдача 38,27 от 09.04.2023 проведена РКО 00289603
+        только 01.10.2023. Свёртка §5.7.2 пару не видит — перенос даты ограничен
+        31 днём, — и одни и те же рубли попадают в отчёт дважды.
+        """
+        paid = date(2023, 4, 9)
+        booked = date(2023, 10, 1)
+        posting = ledger_entry(
+            row=9109,
+            day=booked,
+            credit=Decimal("38.27"),
+            account="62.10.1",
+            category=Category.REFUND,
+            doc="Расходный кассовый ордер 00289603 от 01.10.2023 23:59:59",
+            number="00289603",
+        )
+        unbooked = _localization(
+            code=FindingCode.PAYOUT_NOT_BOOKED,
+            amount="38.27",
+        ).model_copy(update={"date": paid, "ledger_rows": (), "ops_rows": (2231,)})
+        late = _localization(
+            code=FindingCode.RKO_WITHOUT_PAYOUT,
+            amount="38.27",
+        ).model_copy(update={"date": booked, "ledger_rows": (9109,)})
+
+        findings = collect_findings(
+            (),
+            [unbooked, late],
+            (),
+            ClassifyResult(
+                ledger=(posting,),
+                ops=(),
+                fallback=None,
+                unknown_accounts=(),
+            ),
+            _validation(),
+            _waterfall(),
+            PERIOD,
+            BENCHMARK,
+            config,
+        )
+
+        delay = next(item for item in findings if item.code is FindingCode.POSTING_DELAY)
+        assert delay.date == (paid, booked)
+        assert delay.amount == Decimal("38.27")
+        assert delay.balance_impact == ZERO
+        assert delay.ledger_rows == [9109]
+        assert delay.ops_rows == [2231]
+        assert delay.doc_numbers == ["00289603"]
+        assert "175 дней" in delay.explanation
+        assert "23:59:59" in delay.explanation
+
+    def test_earlier_posting_is_not_a_delay(self, config: Config) -> None:
+        """Проводка раньше выдачи — не задержка, а другая операция."""
+        unbooked = _localization(code=FindingCode.PAYOUT_NOT_BOOKED, amount="38.27").model_copy(
+            update={"date": date(2023, 10, 1)},
+        )
+        early = _localization(code=FindingCode.RKO_WITHOUT_PAYOUT, amount="38.27").model_copy(
+            update={"date": date(2023, 4, 9), "ledger_rows": (100,)},
+        )
+        posting = ledger_entry(
+            row=100,
+            day=date(2023, 4, 9),
+            credit=Decimal("38.27"),
+            category=Category.REFUND,
+        )
+
+        findings = collect_findings(
+            (),
+            [unbooked, early],
+            (),
+            ClassifyResult(ledger=(posting,), ops=(), fallback=None, unknown_accounts=()),
+            _validation(),
+            _waterfall(),
+            PERIOD,
+            BENCHMARK,
+            config,
+        )
+
+        assert all(item.code is not FindingCode.POSTING_DELAY for item in findings)
+
+    def test_one_posting_serves_one_payout(self, config: Config) -> None:
+        """Проводка расходуется один раз: две выдачи одной суммы — одна пара."""
+        posting = ledger_entry(
+            row=9109,
+            day=date(2023, 10, 1),
+            credit=Decimal("38.27"),
+            category=Category.REFUND,
+        )
+        first = _localization(code=FindingCode.PAYOUT_NOT_BOOKED, amount="38.27").model_copy(
+            update={"date": date(2023, 4, 9), "ops_rows": (1,)},
+        )
+        second = _localization(code=FindingCode.PAYOUT_NOT_BOOKED, amount="38.27").model_copy(
+            update={"date": date(2023, 5, 9), "ops_rows": (2,)},
+        )
+        late = _localization(code=FindingCode.RKO_WITHOUT_PAYOUT, amount="38.27").model_copy(
+            update={"date": date(2023, 10, 1), "ledger_rows": (9109,)},
+        )
+
+        findings = collect_findings(
+            (),
+            [first, second, late],
+            (),
+            ClassifyResult(ledger=(posting,), ops=(), fallback=None, unknown_accounts=()),
+            _validation(),
+            _waterfall(),
+            PERIOD,
+            BENCHMARK,
+            config,
+        )
+
+        delays = [item for item in findings if item.code is FindingCode.POSTING_DELAY]
+        assert len(delays) == 1
+        assert delays[0].ops_rows == [1]
 
     def test_empty_ledger_keeps_only_reversal_findings(self, config: Config) -> None:
         """Без периода датировать находки уровня выгрузки нечем."""

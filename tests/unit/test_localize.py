@@ -330,6 +330,50 @@ class TestUnbookedPayouts:
         assert results[0].code is FindingCode.PAYOUT_NOT_BOOKED
         assert results[0].ops_rows == (100, 101)
 
+    def test_reversed_day_defers_to_the_reversal_finding(self, config: Config) -> None:
+        """§4.3: сторнированная проводка — это не «проводки нет вовсе».
+
+        Ловушка Солигорска: РКО 00231245 на 1 046,75 от 29.06.2023 сторнирован
+        01.10.2023 (R7991 ↔ R9106). §5.5 снимает обе строки, день остаётся с
+        восемью выдачами и без проводок, и те же рубли попадали в отчёт дважды —
+        как ``REVERSAL_WITHOUT_REBOOK`` со влиянием на сальдо и как восемь
+        «непроведённых выдач» с нулевым влиянием.
+        """
+        ledger = (_refund_posting(7991, Decimal("1046.75")),)
+        ops = (_payout(100, Decimal("1046.75")),)
+        reversals = ReversalResult(
+            neutralized_rows=frozenset({7991}),
+            findings=(),
+            audit_log=(),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            reversals,
+            _timing(((DAY, Decimal("-1046.75")),)),
+            config,
+        )
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.status is LocalizationStatus.EXPLAINED_BY_REVERSAL
+        assert result.code is None
+        assert result.balance_impact == ZERO
+        assert result.ledger_rows == (7991,)
+
+    def test_day_without_any_posting_is_still_unbooked(self, config: Config) -> None:
+        """Без сторно тот же день остаётся ``PAYOUT_NOT_BOOKED`` (§8)."""
+        ops = (_payout(100, Decimal("1046.75")),)
+
+        results = localize(
+            _classified((), ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("-1046.75")),)),
+            config,
+        )
+
+        assert results[0].code is FindingCode.PAYOUT_NOT_BOOKED
+
     def test_balance_impact_is_zero(self, config: Config) -> None:
         """§4.3: этих проводок в 1С нет вовсе — на сальдо они не влияют."""
         ops = (_payout(100, Decimal("8411.73")),)
