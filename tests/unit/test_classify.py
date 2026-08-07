@@ -45,6 +45,7 @@ def ledger_entry(
     account: str = "90.1.1",
     category: Category = Category.OTHER,
     doc: str = "Документ 000123456",
+    number: str = "000123456",
     doc_type: DocType = DocType.PKO,
     is_reversal: bool = False,
 ) -> LedgerEntry:
@@ -57,7 +58,7 @@ def ledger_entry(
         counter_account=account,
         category=category,
         doc_text=doc,
-        doc_number="000123456",
+        doc_number=number,
         doc_type=doc_type,
         is_reversal=is_reversal,
     )
