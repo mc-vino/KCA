@@ -588,6 +588,77 @@ def _result(
     )
 
 
+_AGGREGATE = PostingMode.DAILY_AGGREGATE
+"""Псевдоним ради читаемости условия §5.9.1."""
+
+_MIN_POSTINGS_TO_COVER = 2
+"""Одну проводку покрывать незачем — её берёт правило §5.9.3 напрямую."""
+
+_COVER_SOLUTION_CAP = 2
+"""Больше одного покрытия — разбор дня неоднозначен, дальше считать нечего."""
+
+
+def _cover_aggregates(
+    postings: Sequence[LedgerEntry],
+    operations: Sequence[OpsEntry],
+    config: Config,
+) -> dict[int, tuple[int, ...]]:
+    """Снять проводки-агрегаты, покрытые выдачами дня — §5.9.1 перед §5.9.3.
+
+    В режиме дневных агрегатов одна проводка 1С закрывает группу выдач, и
+    сопоставление 1:1 §5.9.2 её не видит. Пока такие проводки оставались в
+    дне, правило единственной проводки §5.9.3 не применялось: проводок формально
+    было две. На Солигорске это стоило двух дней — 21.04.2023 (проводка 637,00 =
+    352,00 + 24,50 + 260,50, остаётся 53,45 при выдаче 41,60 → завышение 11,85)
+    и 16.06.2025 (проводка 157,58 = 137,99 + 19,59, остаётся 385,00 → завышение
+    257,80).
+
+    Правило намеренно узкое, потому что покрытие — это комбинаторика, а §5.9.3
+    ценен именно тем, что её не требует (§5.9.3, §7.1). Снятие выполняется
+    только когда разбор дня однозначен целиком:
+
+    * ровно одна проводка не покрывается **никаким** подмножеством выдач — она и
+      есть остаток дня;
+    * все остальные покрываются **единственным** способом;
+    * покрытия не пересекаются по выдачам.
+
+    Любое отклонение — отказ: если непокрытых проводок ноль, «остаток» пришлось
+    бы выбирать, а выбор здесь и есть догадка. На 11.10.2022 обе проводки
+    покрываются (827,53 однозначно, 258,03 двумя способами), и день остаётся
+    неразобранным — это верно, а не досадно.
+
+    Returns:
+        ``{строка проводки: строки покрывших её выдач}``; пусто — правило
+        неприменимо.
+    """
+    if len(postings) < _MIN_POSTINGS_TO_COVER or not operations:
+        return {}
+    # Гейт 1 §7.3 действует и здесь: перебор по выдачам того же порядка.
+    if len(operations) > config.subset_sum.HARD_MAX:
+        return {}
+
+    amounts = [to_kopecks(entry.amount) for entry in operations]
+    covers: dict[int, tuple[tuple[int, ...], ...]] = {}
+    for posting in postings:
+        target = to_kopecks(posting.debit + posting.credit)
+        solutions = subset_sum_solutions(amounts, target, 0)
+        covers[posting.row] = solutions[:_COVER_SOLUTION_CAP]
+
+    uncovered = [row for row, found in covers.items() if not found]
+    unique = {row: found[0] for row, found in covers.items() if len(found) == 1}
+    if len(uncovered) != 1 or len(unique) != len(postings) - 1:
+        return {}
+
+    consumed = [index for indexes in unique.values() for index in indexes]
+    if len(consumed) != len(set(consumed)):
+        return {}
+
+    return {
+        row: tuple(operations[index].row for index in indexes)
+        for row, indexes in sorted(unique.items())
+    }
+
+
 def _one_sided_result(
     day: date,
     category: Category,
@@ -719,6 +790,14 @@ def _localize_day(
     postings = [entry for entry in postings if entry.row not in matched_ledger]
     operations = [entry for entry in operations if entry.row not in matched_ops]
 
+    # §5.9.1 — в режиме агрегатов проводка закрывает не одну выдачу, а группу.
+    # Такие проводки снимаются вторым проходом, иначе §5.9.3 не применяется.
+    covered = _cover_aggregates(postings, operations, config) if mode is _AGGREGATE else {}
+    if covered:
+        postings = [entry for entry in postings if entry.row not in covered]
+        consumed = {row for rows in covered.values() for row in rows}
+        operations = [entry for entry in operations if entry.row not in consumed]
+
     # После снятия пар обе части уменьшились на одну и ту же сумму, поэтому
     # ``diff`` не изменился и остаётся разницей дня.
     unpaired_acc = _sum(postings)
@@ -726,6 +805,11 @@ def _localize_day(
     paired_note = (
         f" Снято {len(paired)} однозначных пар «проводка = выдача» (§5.9.2)." if paired else ""
     )
+    if covered:
+        paired_note += (
+            f" Снято {len(covered)} проводок-агрегатов, покрытых выдачами дня "
+            "единственным способом (§5.9.1)."
+        )
 
     one_sided = _one_sided_result(
         day,

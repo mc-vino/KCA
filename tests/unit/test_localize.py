@@ -278,6 +278,89 @@ class TestSinglePostingRule:
         assert result.ledger_rows == (20235,)
         assert result.gates is None
 
+    def test_aggregate_posting_covered_by_payouts_is_removed(self, config: Config) -> None:
+        """§5.9.1: в режиме агрегатов проводка закрывает группу выдач.
+
+        Форма 21.04.2023 Солигорска: проводки 637,00 и 53,45 против выдач
+        352,00 + 24,50 + 260,50 + 41,60. Первая проводка — агрегат трёх выдач,
+        сопоставление 1:1 §5.9.2 его не видит, и день отбрасывался как «проводок
+        две». После снятия агрегата остаётся 53,45 при выдаче 41,60 → завышение
+        11,85.
+        """
+        ledger = (
+            _refund_posting(6801, Decimal("637.00")),
+            _refund_posting(6804, Decimal("53.45")),
+        )
+        ops = (
+            _payout(2301, Decimal("41.60")),
+            _payout(2302, Decimal("352.00")),
+            _payout(2303, Decimal("24.50")),
+            _payout(2304, Decimal("260.50")),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("11.85")),)),
+            config,
+        )
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.code is FindingCode.RKO_OVERSTATED
+        assert result.amount == Decimal("11.85")
+        assert result.ledger_rows == (6804,)
+
+    def test_cover_is_refused_when_no_posting_is_left_over(self, config: Config) -> None:
+        """Форма 11.10.2022: покрываются обе проводки — «остаток» пришлось бы выбрать.
+
+        Пока непокрытой проводки ровно одна, она и есть остаток дня. Если
+        покрываются все, выбор остатка становится догадкой, и день остаётся
+        неразобранным (§7.1).
+        """
+        ledger = (
+            _refund_posting(1, Decimal("70.00")),
+            _refund_posting(2, Decimal("55.00")),
+        )
+        ops = (
+            _payout(100, Decimal("50.00")),
+            _payout(101, Decimal("20.00")),
+            _payout(102, Decimal("25.00")),
+            _payout(103, Decimal("30.00")),
+            _payout(104, Decimal("15.00")),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("-15.00")),)),
+            config,
+        )
+
+        assert results[0].code is not FindingCode.RKO_OVERSTATED
+
+    def test_cover_is_refused_when_it_is_not_unique(self, config: Config) -> None:
+        """Покрытие несколькими способами — какие выдачи израсходованы, неизвестно."""
+        ledger = (
+            _refund_posting(1, Decimal("75.00")),
+            _refund_posting(2, Decimal("300.00")),
+        )
+        ops = (
+            _payout(100, Decimal("50.00")),
+            _payout(101, Decimal("25.00")),
+            _payout(102, Decimal("50.00")),
+            _payout(103, Decimal("25.00")),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("225.00")),)),
+            config,
+        )
+
+        assert results[0].code is not FindingCode.RKO_OVERSTATED
+
     def test_paired_payout_is_not_reported_as_unbooked(self, config: Config) -> None:
         """Снятая пара уходит из кандидатов: выдача 80,83 проведена (§5.9.2)."""
         ledger = (
