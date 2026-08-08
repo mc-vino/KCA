@@ -38,6 +38,7 @@ from scipy.optimize import linear_sum_assignment
 
 from cashforensics.models import (
     Category,
+    CategoryRecon,
     ClassifyResult,
     CollapseResult,
     Config,
@@ -959,11 +960,65 @@ def _localize_day(
     ]
 
 
+def _churn_refusal(
+    category: Category,
+    recon: CategoryRecon | None,
+    collapse: CollapseResult,
+    config: Config,
+) -> LocalizationResult | None:
+    """Отказ по режиму встречных потоков — §5.6, §7.1.
+
+    §5.6: «Низкий ``ratio`` при большом брутто = сильные встречные потоки… В
+    таком режиме одиночная дневная разница малоинформативна: нужна сегментация
+    по окнам (§5.8)». Локализация до документа в этом режиме и есть рассуждение
+    от одиночной дневной разницы, поэтому она запрещена целиком по категории.
+
+    Что это ловит. Инкассация `Кса_с_отклонением` даёт ``ratio`` = 0,002 при
+    810 остаточных днях: нетто 4 038,06 при брутто в сотни тысяч. Без гейта
+    каждый такой день разбирался по отдельности, и раскладка получала 448
+    «завышенных РКО» на ~340 000, уравновешенных строкой «не локализовано» на
+    −338 726,16. На `PAX_119023531` (``ratio`` = 0,001, 467 дней) — 40 строк
+    `RKO_WITHOUT_PAYOUT` на ~100 000 против −100 124,08, при том что §11.3
+    называет для этой инкассации ровно одну величину: cutoff 772,71.
+
+    Порог ``CHURN_MIN_RATIO`` в §6 не задан; 0,05 отделяет наблюдаемый churn
+    (0,001–0,002) от режимов, где локализация подтверждена эталоном §11.3
+    (возвраты Солигорска — 0,226, Витебска — 0,071). Запас в обе стороны больше
+    порядка величины.
+    """
+    if recon is None or recon.ratio is None or not collapse.residual_days:
+        return None
+    if recon.ratio >= config.thresholds.CHURN_MIN_RATIO:
+        return None
+    first = collapse.residual_days[0][0]
+    return _result(
+        first,
+        category,
+        PostingMode.DAILY_AGGREGATE,
+        LocalizationStatus.NOT_LOCALIZED,
+        None,
+        abs(collapse.residual),
+        _ZERO,
+        (
+            f"Категория «{category.value}»: нетто {recon.net} при брутто "
+            f"{recon.gross} даёт ratio {recon.ratio:.3f} — режим встречных "
+            f"потоков (§5.6). Остаток {collapse.residual} размазан по "
+            f"{len(collapse.residual_days)} дням, и одиночная дневная разница в "
+            "таком режиме неинформативна: локализация до документа дала бы "
+            "правдоподобный, но произвольный набор документов (§7.1). "
+            "Расхождение остаётся на уровне категории; разбор — сегментацией по "
+            "окнам §5.8."
+        ),
+        confidence=0.0,
+    )
+
+
 def localize(
     classified: ClassifyResult,
     reversals: ReversalResult,
     timing: dict[Category, CollapseResult],
     config: Config,
+    reconciliation: dict[Category, CategoryRecon] | None = None,
 ) -> tuple[LocalizationResult, ...]:
     """Стадия LOCALIZE целиком — §5.9.
 
@@ -985,6 +1040,11 @@ def localize(
     for category in RECONCILED_CATEGORIES:
         collapse = timing.get(category)
         if collapse is None:
+            continue
+        recon = (reconciliation or {}).get(category)
+        churn = _churn_refusal(category, recon, collapse, config)
+        if churn is not None:
+            results.append(churn)
             continue
         mode = posting_mode(classified.ledger, classified.ops, category, config)
         by_ledger, by_ops = day_index(

@@ -78,7 +78,7 @@ def run_pipeline(
     reversals = neutralize_reversals(classified, config, enabled=neutralize)
     reconciliation = reconcile(classified, reversals, config)
     timing = run_timing(reconciliation, config, enabled=collapse)
-    localizations = localize(classified, reversals, timing, config)
+    localizations = localize(classified, reversals, timing, config, reconciliation)
     balance = balance_trace(classified, normalized.totals.opening, config)
     waterfall = decompose(
         reconciliation,

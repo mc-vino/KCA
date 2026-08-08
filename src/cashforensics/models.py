@@ -789,6 +789,7 @@ class Thresholds(_Frozen):
     SWEEP_MIN_RATIO: float
     ROUND_MAX: Decimal
     AGGREGATE_RATIO: float
+    CHURN_MIN_RATIO: float
 
 
 class SubsetSumConfig(_Frozen):

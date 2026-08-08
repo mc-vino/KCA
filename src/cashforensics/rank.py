@@ -297,9 +297,21 @@ def aggregate_trivial(
 
 
 _LEDGER_SOURCED: frozenset[FindingCode] = frozenset(
-    {FindingCode.SEQUENCE_GAP, FindingCode.DUPLICATE_DOC, FindingCode.SHIFT_ROUNDING},
+    {
+        FindingCode.SEQUENCE_GAP,
+        FindingCode.DUPLICATE_DOC,
+        FindingCode.SHIFT_ROUNDING,
+        FindingCode.PKO_DOUBLE_BOOKED,
+    },
 )
-"""Сигнатуры, чьи ``rows`` — строки карточки счёта, а не опер-лога (§8)."""
+"""Сигнатуры, чьи ``rows`` — строки карточки счёта, а не опер-лога (§8).
+
+Все четыре детектора (:func:`~cashforensics.signatures.sequence_gaps`,
+``repeated_documents``, ``round_number_bias``, ``duplicate_documents``) читают
+``ledger``. Пока ``PKO_DOUBLE_BOOKED`` в набор не входил, его строки уходили в
+``ops_rows``, и находка теряла трассировку: §11.3 называет задвоенный ПКО
+`PAX_119023531` поимённо — R87/R101, — а отчёт показывал пустой список (§12).
+"""
 
 
 def _signature_finding(
