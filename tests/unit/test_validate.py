@@ -13,6 +13,7 @@ from cashforensics.models import (
     LedgerTotals,
     NormalizeResult,
     OpsEntry,
+    OpsKind,
     ValidationCheck,
     ValidationReport,
 )
@@ -227,10 +228,15 @@ class TestWarnings:
         assert not report.hard_failed
 
     def test_v6_flags_cutoff(self, config: Config) -> None:
-        """Записи лога позже последней проводки 1С — признак среза периода."""
+        """Записи лога позже последней проводки 1С — признак среза периода.
+
+        Сравнение идёт по виду документа: ПКО с ПКО, РКО с РКО. Общий максимум
+        по выгрузке срез маскирует — на Щучине приход в 1С остановлен 06.05, а
+        инкассация шла до 12.05, и ``max`` совпадал (§11.3).
+        """
         normalized = _normalized(
             ledger=(ledger_entry(row=1, day=date(2026, 5, 6), debit=Decimal("100.00")),),
-            ops=(ops_entry(row=2, moment=datetime(2026, 5, 12, 10, 0, 0)),),
+            ops=(ops_entry(row=2, moment=datetime(2026, 5, 12, 10, 0, 0), kind=OpsKind.PKO),),
         )
 
         report = validate(normalized, config)
@@ -241,7 +247,7 @@ class TestWarnings:
     def test_v6_quiet_when_log_ends_with_ledger(self, config: Config) -> None:
         normalized = _normalized(
             ledger=(ledger_entry(row=1, day=date(2026, 5, 12), debit=Decimal("100.00")),),
-            ops=(ops_entry(row=2, moment=datetime(2026, 5, 12, 10, 0, 0)),),
+            ops=(ops_entry(row=2, moment=datetime(2026, 5, 12, 10, 0, 0), kind=OpsKind.PKO),),
         )
 
         assert not validate(normalized, config).cutoff_suspected

@@ -89,9 +89,20 @@ def render_section_limitations(result: AnalysisResult) -> str:
     Включает границы доказуемости §1.3 и развилку «какая из систем права».
     """
     refused = sum(1 for item in result.localizations if item.code is None)
+    unverifiable = "".join(
+        f"<li>Категория «{category.value}» не верифицируется: блока опер-лога для неё "
+        f"в выгрузке нет (§3.3). Обороты 1С по ней — {recon.acc_total} — приняты как "
+        "есть, встречной проверки не было.</li>"
+        for category, recon in sorted(
+            result.reconciliation.items(),
+            key=lambda item: item[0].value,
+        )
+        if not recon.verifiable
+    )
     return (
         "<h2>Что проверить и чего инструмент не знает</h2>"
         "<div class='caveat'><ul>"
+        f"{unverifiable}"
         "<li>Инструмент не может сказать, какая из двух систем права: 1С или опер-лог. "
         "Если суммы в проблемных ордерах подтвердятся подписями клиентов, ошибка "
         "окажется в выгрузке фронтальной системы, а не в 1С.</li>"

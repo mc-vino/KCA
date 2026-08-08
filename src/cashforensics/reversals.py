@@ -297,7 +297,15 @@ def neutralize_reversals(
             find_reversal_candidates(reversal, ledger, frozenset(neutralized)),
         )
         if counterpart is None:
-            neutralized.add(reversal.row)
+            # Строка НЕ нейтрализуется: гасить нечем. §5.5 снимает **пару**, а
+            # одиночное сторно — обычная проводка со знаком минус, и в сверке
+            # §5.6 оно обязано участвовать наравне с прочими.
+            #
+            # Пока строка попадала в ``neutralized``, её сумма уходила из
+            # категорийного ряда, но оставалась в нарастающем сальдо, и
+            # тождество §5.10 расходилось ровно на неё. На `Кса_с_отклонением`
+            # это давало `unresolved` = −40,00 при пороге §13.2 |x| < 2,00 —
+            # блокирующий дефект по критерию приёмки.
             findings.append(_unmatched_finding(reversal))
             audit.append(
                 AuditLogEntry(

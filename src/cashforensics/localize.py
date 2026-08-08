@@ -758,6 +758,8 @@ def _localize_day(
     postings: Sequence[LedgerEntry],
     operations: Sequence[OpsEntry],
     config: Config,
+    matched_ledger: frozenset[int],
+    matched_ops: frozenset[int],
     pool_kopecks: Sequence[int] = (),
     reversed_rows: Sequence[int] = (),
 ) -> list[LocalizationResult]:
@@ -813,9 +815,9 @@ def _localize_day(
 
     # §5.9.2 — снять однозначные пары «проводка = выдача». Разница дня от этого
     # не меняется: из обеих частей уходит одна и та же сумма.
-    paired = greedy_match(postings, operations, config)
-    matched_ledger = {ledger_row for ledger_row, _ in paired}
-    matched_ops = {ops_row for _, ops_row in paired}
+    paired = sum(entry.row in matched_ledger for entry in postings) + sum(
+        entry.row in matched_ops for entry in operations
+    )
     postings = [entry for entry in postings if entry.row not in matched_ledger]
     operations = [entry for entry in operations if entry.row not in matched_ops]
 
@@ -832,7 +834,7 @@ def _localize_day(
     unpaired_acc = _sum(postings)
     unpaired_ops = _sum(operations)
     paired_note = (
-        f" Снято {len(paired)} однозначных пар «проводка = выдача» (§5.9.2)." if paired else ""
+        f" Снято {paired} записей, сопоставленных 1:1 в окне DATE_WIN (§5.9.2)." if paired else ""
     )
     if covered:
         paired_note += (
@@ -991,6 +993,22 @@ def localize(
             category,
             reversals.neutralized_rows,
         )
+        # §5.9.2 — сопоставление 1:1 ведётся **в окне ``DATE_WIN`` по всему
+        # периоду**, а не внутри дня. Разница принципиальная: инкассация везде
+        # подокументная, и на четырёх из семи калибровочных касс лог опережает
+        # 1С на день. Сопоставление внутри дня давало на них ноль пар из
+        # восьмисот, дни уходили в §5.9.4, и Кса_с_отклонением получала 448
+        # «завышенных РКО» на ~340 000 при истинном расхождении 4 038,06.
+        # То же окно снимает 786 пар из 814 и оставляет ровно непарные записи —
+        # то, что §5.9.2 и называет находками.
+        pairs = greedy_match(
+            [entry for bucket in by_ledger.values() for entry in bucket],
+            [entry for bucket in by_ops.values() for entry in bucket],
+            config,
+        )
+        matched_ledger = frozenset(ledger_row for ledger_row, _ in pairs)
+        matched_ops = frozenset(ops_row for _, ops_row in pairs)
+
         # Пул периода для гейта 4 §7.3 — суммы всех выдач категории.
         pool = [to_kopecks(entry.amount) for bucket in by_ops.values() for entry in bucket]
         # Снятые §5.5 проводки по дням: день без проводок нужно уметь отличить
@@ -1008,6 +1026,8 @@ def localize(
                     by_ledger.get(day, []),
                     by_ops.get(day, []),
                     config,
+                    matched_ledger,
+                    matched_ops,
                     pool,
                     reversed_by_day.get(day, []),
                 ),

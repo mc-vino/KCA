@@ -37,6 +37,7 @@ from cashforensics.models import (
 
 __all__ = [
     "RECONCILED_CATEGORIES",
+    "block_present",
     "daily_differences",
     "daily_ledger_series",
     "daily_ops_series",
@@ -71,6 +72,28 @@ def ops_classes_for(category: Category, *, exclude_service: bool) -> tuple[OpsCl
     if category is Category.REFUND:
         return (OpsClass.REFUND,) if exclude_service else (OpsClass.REFUND, OpsClass.SERVICE)
     return ()
+
+
+def block_present(ops: Sequence[OpsEntry], category: Category) -> bool:
+    """Есть ли в выгрузке блок опер-лога для этой категории — §3.3, вариант D.
+
+    Приход сверяется с блоком ПКО, инкассация и возвраты — с блоком РКО.
+    Отсутствие блока и отсутствие операций в нём — разные вещи: во втором
+    случае «проводка без выдачи» остаётся законной находкой §8, в первом
+    сверять не с чем вовсе.
+
+    Ловушка `Кса_с_отклонением` и `Максиму_касса_2`: блока ПКО в выгрузке нет
+    (вариант D §3.3), и без этой проверки каждый день прихода объявлялся
+    расхождением на всю свою сумму — 810 и 1 042 «проблемных дня» на
+    2 979 052,00 и 4 870 682,41. §11.3 формулирует это прямо: «нет ПКО → приход
+    не верифицируется».
+
+    Признак наличия блока — хотя бы одна запись соответствующего вида: блок,
+    присутствующий в листе, но пустой во всём периоде, на этих выгрузках не
+    встречается, а пустой блок и его отсутствие означают одно и то же.
+    """
+    kind = OpsKind.PKO if category is Category.INCOME else OpsKind.RKO
+    return any(entry.kind is kind for entry in ops)
 
 
 def daily_ledger_series(
@@ -164,7 +187,8 @@ def reconcile_category(
         )
 
     reconciled = ops if adjusted_series is None else adjusted_series
-    differences = daily_differences(acc, reconciled)
+    verifiable = block_present(classified.ops, category)
+    differences = daily_differences(acc, reconciled) if verifiable else ()
 
     return CategoryRecon(
         category=category,
@@ -182,6 +206,7 @@ def reconcile_category(
         daily_differences=differences,
         adjusted_net=adjusted_net,
         adjusted_gross=adjusted_gross,
+        verifiable=verifiable,
     )
 
 

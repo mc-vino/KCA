@@ -201,13 +201,20 @@ class TestNeutralization:
 
         assert result.findings[0].code is FindingCode.REVERSAL_PAIR
 
-    def test_unmatched_storno_is_reported(self, config: Config) -> None:
+    def test_unmatched_storno_is_reported_but_not_neutralized(self, config: Config) -> None:
+        """§5.5 снимает **пару**; одиночное сторно гасить нечем.
+
+        Пока такая строка попадала в ``neutralized_rows``, её сумма уходила из
+        категорийного ряда §5.6, но оставалась в нарастающем сальдо §5.8, и
+        тождество §5.10 расходилось ровно на неё. На `Кса_с_отклонением` это
+        давало ``unresolved`` = −40,00 при пороге §13.2 ``|x| < 2,00``.
+        """
         ledger = (_storno(9, date(2023, 10, 1), Decimal("1046.75")),)
 
         result = neutralize_reversals(_classified(ledger=ledger), config)
 
         assert result.findings[0].code is FindingCode.REVERSAL_UNMATCHED
-        assert result.neutralized_rows == frozenset({9})
+        assert result.neutralized_rows == frozenset()
 
     def test_findings_never_call_it_theft(self, config: Config) -> None:
         """§1.2, §13.10: инструмент не квалифицирует находку как хищение."""

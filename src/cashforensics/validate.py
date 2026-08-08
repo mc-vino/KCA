@@ -15,7 +15,9 @@ from decimal import Decimal
 from cashforensics.classify import unknown_accounts
 from cashforensics.models import (
     Config,
+    DocType,
     NormalizeResult,
+    OpsKind,
     ValidationCheck,
     ValidationReport,
 )
@@ -185,22 +187,43 @@ def check_v6_cutoff(normalized: NormalizeResult) -> ValidationCheck:
 
     Признак среза периода (``PERIOD_CUTOFF``, §8): цикл «приход → инкассация»
     оборвался на границе выгрузки.
+
+    Сравнение ведётся **по виду документа** (ПКО против ПКО, РКО против РКО), а
+    не по выгрузке целиком. Срез — это обрыв одного потока при продолжающемся
+    другом, и общий максимум его маскирует: на Щучине приход в 1С остановлен
+    06.05.2026, а инкассация шла до 12.05, поэтому ``max`` по всем проводкам
+    совпадал с ``max`` по логу и проверка молчала — при том, что §11.3 называет
+    эту кассу эталонным cutoff.
+
+    Вид документа, а не категория §5.4: стадия VALIDATE идёт **до** CLASSIFY, и
+    категорий на этом шаге ещё нет.
     """
     if not normalized.ledger or not normalized.ops:
         return _skipped("V6", "недостаточно данных для проверки среза периода")
 
-    last_ledger = max(entry.date for entry in normalized.ledger)
-    last_ops = max(entry.dt.date() for entry in normalized.ops)
-    suspected = last_ops > last_ledger
+    lagging: list[str] = []
+    for kind, doc_type in ((OpsKind.PKO, DocType.PKO), (OpsKind.RKO, DocType.RKO)):
+        ledger_days = [entry.date for entry in normalized.ledger if entry.doc_type is doc_type]
+        ops_days = [entry.dt.date() for entry in normalized.ops if entry.kind is kind]
+        if not ledger_days or not ops_days:
+            continue
+        last_ledger = max(ledger_days)
+        last_ops = max(ops_days)
+        if last_ops > last_ledger:
+            lagging.append(
+                f"{kind.value}: 1С до {last_ledger:%d.%m.%Y}, лог до {last_ops:%d.%m.%Y}",
+            )
+
     return ValidationCheck(
         code="V6",
-        passed=not suspected,
+        passed=not lagging,
         skipped=False,
         expected=None,
         actual=None,
         message=(
-            f"последняя проводка 1С {last_ledger:%d.%m.%Y}, последняя запись лога "
-            f"{last_ops:%d.%m.%Y}" + (": признак среза периода" if suspected else "")
+            "; ".join(lagging) + ": признак среза периода"
+            if lagging
+            else "лог нигде не выходит за последнюю проводку 1С"
         ),
     )
 
