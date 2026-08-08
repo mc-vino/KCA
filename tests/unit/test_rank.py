@@ -19,6 +19,7 @@ import pytest
 
 from cashforensics.models import (
     Category,
+    CategoryRecon,
     ClassifyResult,
     Config,
     Finding,
@@ -140,6 +141,26 @@ def _validation(*, cutoff: bool = False) -> ValidationReport:
 
 def _classified(*, unknown: tuple[str, ...] = ()) -> ClassifyResult:
     return ClassifyResult(ledger=(), ops=(), fallback=None, unknown_accounts=unknown)
+
+
+def _recon(*, collection_net: str = "0.00") -> dict[Category, CategoryRecon]:
+    """Минимальная сверка §5.6: нужна только величина среза периода."""
+    return {
+        Category.COLLECTION: CategoryRecon(
+            category=Category.COLLECTION,
+            acc_total=ZERO,
+            ops_total=ZERO,
+            net=Decimal(collection_net),
+            gross=ZERO,
+            ratio=None,
+            days_with_difference=0,
+            acc_series=(),
+            ops_series=(),
+            daily_differences=(),
+            adjusted_net=None,
+            adjusted_gross=None,
+        ),
+    }
 
 
 class TestMateriality:
@@ -282,6 +303,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -305,6 +327,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -319,6 +342,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -335,6 +359,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -351,6 +376,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -366,6 +392,7 @@ class TestCollectFindings:
             _classified(unknown=("76.6",)),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -380,6 +407,7 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(log_imbalance="-807.91"),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -396,14 +424,20 @@ class TestCollectFindings:
             _classified(),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
         )
         assert findings == ()
 
-    def test_cutoff_is_reported_but_does_not_double_count(self, config: Config) -> None:
-        """Срез периода объясняет сальдо, но своей строки в раскладку не добавляет."""
+    def test_cutoff_carries_the_unbooked_collection(self, config: Config) -> None:
+        """§8: срез периода влияет на сальдо — величина равна непроведённой инкассации.
+
+        Эталон §5.10 для PAX_119023531 приводит эту строку как «+772,71
+        инкассация не проведена (срез периода)». Пока находка несла нулевое
+        влияние, строка в раскладке не появлялась вовсе.
+        """
         findings = collect_findings(
             (),
             (),
@@ -411,12 +445,13 @@ class TestCollectFindings:
             _classified(),
             _validation(cutoff=True),
             _waterfall(),
+            _recon(collection_net="-772.71"),
             PERIOD,
             BENCHMARK,
             config,
         )
         assert findings[0].code is FindingCode.PERIOD_CUTOFF
-        assert findings[0].balance_impact == ZERO
+        assert findings[0].balance_impact == Decimal("772.71")
 
     def test_late_booking_becomes_posting_delay(self, config: Config) -> None:
         """§8 ``POSTING_DELAY``: выдача и её проводка разнесены на месяцы.
@@ -457,6 +492,7 @@ class TestCollectFindings:
             ),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -494,6 +530,7 @@ class TestCollectFindings:
             ClassifyResult(ledger=(posting,), ops=(), fallback=None, unknown_accounts=()),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -526,6 +563,7 @@ class TestCollectFindings:
             ClassifyResult(ledger=(posting,), ops=(), fallback=None, unknown_accounts=()),
             _validation(),
             _waterfall(),
+            _recon(),
             PERIOD,
             BENCHMARK,
             config,
@@ -545,6 +583,7 @@ class TestCollectFindings:
             _classified(unknown=("76.6",)),
             _validation(cutoff=True),
             _waterfall(log_imbalance="-807.91"),
+            _recon(),
             None,
             BENCHMARK,
             config,

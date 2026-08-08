@@ -58,6 +58,7 @@ __all__ = [
     "BITMASK_LIMIT",
     "HUNGARIAN_WEIGHTS",
     "apply_gates",
+    "balance_impact_of",
     "day_index",
     "gate_candidate_count",
     "gate_density",
@@ -660,6 +661,25 @@ def _cover_aggregates(
     }
 
 
+def balance_impact_of(category: Category, ledger_excess: Decimal) -> Decimal:
+    """Вклад расхождения в отклонение сальдо — §4.3, §5.10.
+
+    ``ledger_excess`` — насколько 1С провела **больше** опер-лога по категории.
+
+    Знак задаётся стороной проводки по счёту 50.2. Возвраты и инкассация идут в
+    кредит: лишний рубль, проведённый в 1С, уносит рубль из сальдо, поэтому
+    вклад отрицателен. Приход идёт в дебет, и там знак прямой.
+
+    Эталон §5.10 (докстринг :func:`causal_decomposition`, касса PAX_119023531)
+    записан именно так: РКО 00284721 на 2 579,00, проведённый в 1С без выдачи,
+    стоит в раскладке строкой **−2 579,00**. Пока знак был прямым, раскладка
+    сходилась только за счёт строки «не локализовано»: на этой кассе она
+    поглощала −2 872,62 при отклонении −293,62, на Солигорске −13 218,09 при
+    −1 224,80.
+    """
+    return ledger_excess if category is Category.INCOME else -ledger_excess
+
+
 def _one_sided_result(
     day: date,
     category: Category,
@@ -738,7 +758,7 @@ def _one_sided_result(
             LocalizationStatus.LOCALIZED,
             FindingCode.RKO_WITHOUT_PAYOUT,
             unpaired_acc,
-            unpaired_acc,
+            balance_impact_of(category, unpaired_acc),
             (
                 f"За {day:%d.%m.%Y} в 1С проведено {len(postings)} документов на "
                 f"{unpaired_acc}, выдач по ним в опер-логе нет. Требует проверки: "
@@ -874,7 +894,7 @@ def _localize_day(
                 LocalizationStatus.LOCALIZED,
                 FindingCode.RKO_OVERSTATED,
                 abs(diff),
-                diff,
+                balance_impact_of(category, diff),
                 (
                     f"{posting.doc_text or 'документ'} от {day:%d.%m.%Y}: в 1С "
                     f"{unpaired_acc}, в опер-логе без пары {unpaired_ops} "
@@ -897,7 +917,7 @@ def _localize_day(
     else:
         candidates = postings
         code = FindingCode.RKO_WITHOUT_PAYOUT
-        impact = diff
+        impact = balance_impact_of(category, diff)
 
     amounts = [
         to_kopecks(entry.debit + entry.credit if isinstance(entry, LedgerEntry) else entry.amount)

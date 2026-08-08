@@ -16,7 +16,7 @@ import typer
 
 from cashforensics.balance import balance_trace
 from cashforensics.classify import BlockClassificationFailed, classify
-from cashforensics.decompose import check_tie, decompose
+from cashforensics.decompose import causal_decomposition, check_tie, decompose
 from cashforensics.ingest import ingest
 from cashforensics.localize import localize
 from cashforensics.models import AnalysisResult, Config, LocalizationStatus, load_config
@@ -80,13 +80,8 @@ def run_pipeline(
     timing = run_timing(reconciliation, config, enabled=collapse)
     localizations = localize(classified, reversals, timing, config, reconciliation)
     balance = balance_trace(classified, normalized.totals.opening, config)
-    waterfall = decompose(
-        reconciliation,
-        balance,
-        classified,
-        reversals.findings,
-        localizations,
-    )
+    # Категорийная раскладка §5.10 находок не требует — только тождество §5.6.
+    waterfall = decompose(reconciliation, balance, classified, (), localizations)
 
     benchmark = sum(
         (entry.debit for entry in classified.ledger),
@@ -102,12 +97,21 @@ def run_pipeline(
             classified,
             validation,
             waterfall,
+            reconciliation,
             period,
             benchmark,
             config,
         ),
         benchmark,
         config,
+    )
+
+    # Причинная форма §5.10 строится ПОСЛЕ ранжирования: ей нужен полный список
+    # находок §8, а не только сторно §5.5. Пока раскладка собиралась до сборки
+    # находок, задвоенный ПКО, срез периода, неизвестные счета и дисбаланс логов
+    # не могли попасть в неё в принципе — их строки уходили в «не локализовано».
+    waterfall = waterfall.model_copy(
+        update={"causal_lines": causal_decomposition(waterfall, findings, localizations)},
     )
 
     meta = ingested.meta.model_copy(update={"actual_period": period})

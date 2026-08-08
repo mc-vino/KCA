@@ -30,7 +30,6 @@ from cashforensics.models import (
     ClassifyResult,
     Finding,
     LocalizationResult,
-    LocalizationStatus,
     Waterfall,
 )
 from cashforensics.reconcile import log_imbalance
@@ -112,7 +111,7 @@ def build_waterfall(
 def causal_decomposition(
     waterfall: Waterfall,
     findings: Sequence[Finding],
-    localizations: Sequence[LocalizationResult],
+    localizations: Sequence[LocalizationResult],  # noqa: ARG001  # трассировка, см. ниже
 ) -> tuple[CausalLine, ...]:
     """Перевести раскладку в причинную форму — §5.10.
 
@@ -123,6 +122,11 @@ def causal_decomposition(
     Строки ниже порога не выбрасываются: их суммарный вклад собирается в
     строку «не локализовано», иначе раскладка перестала бы сходиться, а
     пользователь не увидел бы, какая часть отклонения осталась необъяснённой.
+
+    Источник строк — **только** ``findings``: после §5.11 этот список уже
+    содержит и локализации §5.9, и сигнатуры §8, и факты уровня выгрузки.
+    ``localizations`` передаётся ради трассировки и в сумму не идёт — иначе
+    локализованное расхождение попадало бы в раскладку дважды.
 
     Эталон (PAX_119023531)::
 
@@ -139,6 +143,18 @@ def causal_decomposition(
     for index, finding in enumerate(findings):
         if finding.balance_impact == _ZERO or finding.confidence < CAUSAL_CONFIDENCE_FLOOR:
             continue
+        # §13.7: каждая строка причинной раскладки обязана прослеживаться до
+        # строк исходного файла. Находка уровня выгрузки трассировки не имеет —
+        # ``LOG_IMBALANCE`` §5.10 прямо назван «измеряется, но не объясняется»
+        # (§16), а срез периода описывает границу выгрузки, а не документ.
+        # Их место — категорийная часть раскладки, где они уже учтены
+        # тождеством §5.10; строкой причины они быть не могут.
+        #
+        # Без этого на кассах варианта D раскладка уходила в миллионы: без блока
+        # ПКО ``log_imbalance`` равен минус всей сумме РКО, и на Максиму_касса_2
+        # причинная часть показывала −5 167 831,72 против отклонения +2 617,79.
+        if not finding.ledger_rows and not finding.ops_rows:
+            continue
         lines.append(
             CausalLine(
                 amount=finding.balance_impact,
@@ -148,26 +164,6 @@ def causal_decomposition(
             ),
         )
         explained += finding.balance_impact
-
-    for result in localizations:
-        if (
-            result.status is not LocalizationStatus.LOCALIZED
-            or result.balance_impact == _ZERO
-            or result.confidence < CAUSAL_CONFIDENCE_FLOOR
-        ):
-            continue
-        lines.append(
-            CausalLine(
-                amount=result.balance_impact,
-                title=(
-                    f"{result.code.value if result.code else 'расхождение'} "
-                    f"за {result.date:%d.%m.%Y}"
-                ),
-                finding_index=None,
-                doc_numbers=result.doc_numbers,
-            ),
-        )
-        explained += result.balance_impact
 
     lines.sort(key=lambda line: (-abs(line.amount), line.title))
 

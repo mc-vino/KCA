@@ -129,7 +129,10 @@ class TestRefundDiscrepancies:
 
         finding = _finding(result, FindingCode.RKO_OVERSTATED)
         assert finding.amount == Decimal("160.89")  # type: ignore[attr-defined]
-        assert finding.balance_impact == Decimal("160.89")  # type: ignore[attr-defined]
+        # Возврат идёт в кредит 50.2: лишний проведённый рубль уносит рубль из
+        # сальдо, поэтому вклад отрицателен (§4.3, §5.10). На Витебске всё
+        # отклонение −160,89 объясняется этой одной строкой.
+        assert finding.balance_impact == Decimal("-160.89")  # type: ignore[attr-defined]
 
     def test_rko_without_payout(
         self,

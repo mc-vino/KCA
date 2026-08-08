@@ -15,6 +15,8 @@ from datetime import date
 from decimal import Decimal
 
 from cashforensics.models import (
+    Category,
+    CategoryRecon,
     ClassifyResult,
     Config,
     Finding,
@@ -72,6 +74,14 @@ p-value — это флаг похожести, а не сведённое ра�
 корректная её интерпретация задана самим ТЗ: «требует точечной проверки»
 (§8.1). Значение подобрано так, чтобы :func:`confidence_label` выдавал именно
 эту формулировку, и не должно подниматься ради «красивого» отчёта.
+
+Относится не ко всем сигнатурам. Коды из :data:`_BALANCE_AFFECTING` —
+детерминированная арифметика по карточке счёта, а не признак похожести:
+задвоенный ПКО это «две проводки одной суммы, один день, один счёт, разные
+номера», и §8 даёт ему severity ``ОШИБКА``. Такие находки получают
+:data:`CONFIDENCE_LOCALIZED`, иначе порог §7.6 (0,90) не пускает их в причинную
+раскладку: эталонная строка PAX_119023531 «+1 400,00 R87/R101 — задвоенный ПКО»
+не появлялась именно поэтому.
 """
 
 CODE_SEVERITY: dict[FindingCode, Severity] = {
@@ -97,13 +107,26 @@ CODE_SEVERITY: dict[FindingCode, Severity] = {
 
 _BALANCE_AFFECTING: frozenset[FindingCode] = frozenset(
     {
-        FindingCode.SHIFT_ROUNDING,
         FindingCode.PERIOD_CUTOFF,
         FindingCode.LOG_IMBALANCE,
         FindingCode.UNKNOWN_ACCOUNT,
+        FindingCode.PKO_DOUBLE_BOOKED,
     },
 )
 """Коды сигнатурного происхождения, у которых ``balance_impact`` ≠ 0 (§8).
+
+``SHIFT_ROUNDING`` сюда **не** входит, хотя §8 помечает его «влияет: да».
+Помечена там недостача смены, а детектор :func:`round_number_bias` её не
+измеряет: он отмечает круглую сумму ниже ``ROUND_MAX`` и по §15 годится «только
+как слабый признак». Считать всю сумму такой проводки отклонением нельзя —
+приход в 50,00 это приход, а не недостача. На Витебске четыре такие проводки
+давали в причинную раскладку +170,00 при полном отклонении −160,89, то есть
+строку больше самого отклонения.
+
+``PKO_DOUBLE_BOOKED`` в таблице §8 стоит с пометкой «влияет на сальдо: да» —
+задвоенный приход поднимает сальдо на лишний ордер. Пока код в набор не входил,
+эталонная строка раскладки PAX_119023531 «+1 400,00 R87/R101 — задвоенный ПКО
+на аванс» не появлялась вовсе (§5.10).
 
 Остальные сигнатуры (``REPEAT_PAYOUT``, ``LATE_TIME_DOC``, ``SEQUENCE_GAP``)
 по таблице §8 на сальдо не влияют: повтор выдачи проведён 1С агрегатом, а
@@ -338,7 +361,9 @@ def _signature_finding(
         title=signature.title,
         explanation=explanation,
         evidence={"rule": "§8 сигнатура", "baseline": signature.baseline},
-        confidence=CONFIDENCE_SIGNATURE,
+        confidence=(
+            CONFIDENCE_LOCALIZED if signature.code in _BALANCE_AFFECTING else CONFIDENCE_SIGNATURE
+        ),
         materiality=finding_materiality(amount, impact, thresholds),
         balance_impact=impact,
     )
@@ -384,6 +409,7 @@ def _context_findings(
     classified: ClassifyResult,
     validation: ValidationReport,
     waterfall: Waterfall,
+    reconciliation: dict[Category, CategoryRecon],
     period: tuple[date, date],
     thresholds: MaterialityThresholds,
 ) -> list[Finding]:
@@ -480,6 +506,12 @@ def _context_findings(
         )
 
     if validation.cutoff_suspected:
+        # §8: срез периода влияет на сальдо. Величина — непроведённая часть
+        # инкассации: последняя выемка легла в лог, но в 1С не попала, поэтому
+        # сальдо 1С выше фактического ровно на неё. Эталон §5.10 для
+        # PAX_119023531 приводит эту строку как «+772,71 инкассация не
+        # проведена (срез периода)».
+        cutoff_impact = -reconciliation[Category.COLLECTION].net
         findings.append(
             Finding(
                 code=FindingCode.PERIOD_CUTOFF,
@@ -495,11 +527,11 @@ def _context_findings(
                 evidence={"rule": "§5.3 срез периода"},
                 confidence=CONFIDENCE_PROBABLE,
                 materiality=finding_materiality(
-                    abs(waterfall.closing - waterfall.target),
-                    _ZERO,
+                    abs(cutoff_impact),
+                    cutoff_impact,
                     thresholds,
                 ),
-                balance_impact=_ZERO,
+                balance_impact=cutoff_impact,
             ),
         )
 
@@ -628,6 +660,7 @@ def collect_findings(
     classified: ClassifyResult,
     validation: ValidationReport,
     waterfall: Waterfall,
+    reconciliation: dict[Category, CategoryRecon],
     period: tuple[date, date] | None,
     benchmark: Decimal,
     config: Config,
@@ -655,7 +688,7 @@ def collect_findings(
             if item.code is not None
         ),
         *(_signature_finding(item, period, thresholds) for item in signatures),
-        *_context_findings(classified, validation, waterfall, period, thresholds),
+        *_context_findings(classified, validation, waterfall, reconciliation, period, thresholds),
         *_posting_delay_findings(localizations, classified, thresholds),
     ]
     return tuple(findings)
