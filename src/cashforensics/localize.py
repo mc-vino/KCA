@@ -782,6 +782,35 @@ def _localize_day(
     ops_total = _sum(operations)
     diff = acc - ops_total
 
+    # §7.4 — абсолютный запрет, и потому он стоит ПЕРВЫМ, до сопоставления и до
+    # разбора односторонних дней. Проверка «ниже агрегата продаж» ниже по тексту
+    # пропускала день, у которого после сопоставления 1:1 не оставалось ни одной
+    # проводки: восемьдесят чеков объявлялись «непроведёнными выдачами», то есть
+    # ровно той локализацией ниже дневного агрегата, которую §7.4 запрещает
+    # «независимо от гейтов». Заодно код был бессмысленным: в приходе записи
+    # лога — чеки, а не выдачи.
+    if category is Category.INCOME:
+        return [
+            _result(
+                day,
+                category,
+                mode,
+                LocalizationStatus.REFUSED_BELOW_Z_REPORT,
+                None,
+                abs(diff),
+                diff,
+                (
+                    f"Расхождение {abs(diff)} локализовано до дня {day:%d.%m.%Y} и до "
+                    f"агрегата; ниже — требуется Z-отчёт за {day:%d.%m.%Y}. "
+                    "1С хранит свод Z-отчёта одной проводкой, опер-лог — поштучные "
+                    "чеки; разложение агрегата на чеки запрещено §7.4 независимо "
+                    "от гейтов."
+                ),
+                ledger_rows=tuple(entry.row for entry in postings),
+                ops_rows=tuple(entry.row for entry in operations),
+            ),
+        ]
+
     # §5.9.2 — снять однозначные пары «проводка = выдача». Разница дня от этого
     # не меняется: из обеих частей уходит одна и та же сумма.
     paired = greedy_match(postings, operations, config)
@@ -853,29 +882,6 @@ def _localize_day(
                 ledger_rows=(posting.row,),
                 ops_rows=tuple(entry.row for entry in operations),
                 doc_numbers=(posting.doc_number,) if posting.doc_number else (),
-            ),
-        ]
-
-    # Абсолютный запрет §7.4: ниже дневного агрегата продаж не локализуем.
-    if category is Category.INCOME:
-        return [
-            _result(
-                day,
-                category,
-                mode,
-                LocalizationStatus.REFUSED_BELOW_Z_REPORT,
-                None,
-                abs(diff),
-                diff,
-                (
-                    f"Расхождение {abs(diff)} локализовано до дня {day:%d.%m.%Y} и до "
-                    f"агрегата; ниже — требуется Z-отчёт за {day:%d.%m.%Y}. "
-                    "1С хранит свод Z-отчёта одной проводкой, опер-лог — поштучные "
-                    "чеки; разложение агрегата на чеки запрещено §7.4 независимо "
-                    "от гейтов."
-                ),
-                ledger_rows=tuple(entry.row for entry in postings),
-                ops_rows=tuple(entry.row for entry in operations),
             ),
         ]
 

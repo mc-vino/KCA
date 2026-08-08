@@ -43,6 +43,7 @@ __all__ = [
     "modified_z_scores",
     "repeat_baseline_pko",
     "repeat_payouts",
+    "repeated_documents",
     "round_number_bias",
     "sequence_gaps",
 ]
@@ -415,12 +416,64 @@ def sequence_gaps(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
     return tuple(signatures)
 
 
+def repeated_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
+    """Дубликаты документов — §8, ``DUPLICATE_DOC``.
+
+    Оборотная сторона :func:`duplicate_documents`: там признаком задвоения
+    служат **разные** номера, а совпадение номеров оттуда явно исключено. Тот
+    случай и есть ``DUPLICATE_DOC`` — один и тот же документ в выгрузке дважды.
+
+    Различать их обязательно, потому что §8 даёт им разные severity и разное
+    влияние на сальдо: задвоенный приход — ``ОШИБКА`` и влияет, дубликат —
+    ``ПРОВЕРИТЬ`` и «зависит». Чаще всего дубликат означает дефект выгрузки, а
+    не учёта, поэтому формулировка не утверждает задвоения.
+    """
+    buckets: dict[tuple[object, str], list[LedgerEntry]] = defaultdict(list)
+    for entry in ledger:
+        if not entry.doc_number:
+            continue
+        buckets[(entry.date, entry.doc_number)].append(entry)
+
+    signatures: list[Signature] = []
+    for (day, number), bucket in sorted(buckets.items(), key=lambda item: item[0]):
+        if len(bucket) < _MIN_DUPLICATES:
+            continue
+        amounts = {entry.debit + entry.credit for entry in bucket}
+        exact = len(amounts) == 1
+        amount = next(iter(sorted(amounts)))
+        kind = "точный" if exact else "нечёткий"
+        signatures.append(
+            Signature(
+                code=FindingCode.DUPLICATE_DOC,
+                title=f"Дубликат документа {number} ({kind})",
+                date=day,  # type: ignore[arg-type]
+                amount=amount if exact else None,
+                rows=tuple(sorted(entry.row for entry in bucket)),
+                baseline=(
+                    "повтор одного номера чаще означает дефект выгрузки, а не "
+                    "учёта: одна проводка может занимать несколько строк карточки"
+                ),
+                explanation=(
+                    f"Документ {number} за {day:%d.%m.%Y} встречается "
+                    f"{len(bucket)} раза"
+                    + (
+                        f" одной суммой {amount}."
+                        if exact
+                        else f" с разными суммами ({', '.join(str(x) for x in sorted(amounts))})."
+                    )
+                    + " Требует проверки: возможен дубликат выгрузки."
+                ),
+            ),
+        )
+    return tuple(signatures)
+
+
 def duplicate_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
     """Задвоенные приходные ордера — §8, ``PKO_DOUBLE_BOOKED``.
 
     Признак §8: две проводки одной суммы, один день, один счёт, **разные
     номера**. Совпадение номеров означало бы дубликат выгрузки, а не задвоение
-    проведения.
+    проведения — этот случай разбирает :func:`repeated_documents`.
     """
     buckets: dict[tuple[object, str, Decimal], list[LedgerEntry]] = defaultdict(list)
     for entry in ledger:
@@ -543,6 +596,7 @@ def collect_signatures(
         *late_time_documents(classified.ops, config),
         *sequence_gaps(classified.ledger),
         *duplicate_documents(classified.ledger),
+        *repeated_documents(classified.ledger),
         *round_number_bias(classified.ledger, config),
     )
     return tuple(

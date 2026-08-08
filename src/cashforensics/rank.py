@@ -23,6 +23,7 @@ from cashforensics.models import (
     LocalizationResult,
     Materiality,
     MaterialityThresholds,
+    OpsClass,
     Severity,
     Signature,
     ValidationReport,
@@ -410,6 +411,35 @@ def _context_findings(
                 confidence=CONFIDENCE_LOCALIZED,
                 materiality=finding_materiality(amount, amount, thresholds),
                 balance_impact=amount,
+            ),
+        )
+
+    service = [entry for entry in classified.ops if entry.classification is OpsClass.SERVICE]
+    if service:
+        total = sum((entry.amount for entry in service), _ZERO)
+        findings.append(
+            Finding(
+                code=FindingCode.SERVICE_MISCLASSIFIED,
+                severity=CODE_SEVERITY[FindingCode.SERVICE_MISCLASSIFIED],
+                date=period,
+                amount=total,
+                ops_rows=sorted(entry.row for entry in service),
+                title=f"Служебных выдач в блоке РКО: {len(service)} на {total}",
+                explanation=(
+                    f"{len(service)} записей опер-лога на {total} физически лежат в "
+                    "блоке РКО и в варианте «как есть» считаются возвратами, хотя "
+                    "проводок возврата в 1С им не соответствует (§3.6). Из сверки "
+                    "они исключены; на сальдо не влияют — это мера мнимого "
+                    "расхождения, а не расхождение. В дисбаланс логов §5.10 они "
+                    "входят: наличные из ящика они выносят наравне с возвратом."
+                ),
+                evidence={
+                    "rule": "§3.6 служебные операции",
+                    "counterparties": sorted({entry.counterparty for entry in service}),
+                },
+                confidence=CONFIDENCE_LOCALIZED,
+                materiality=finding_materiality(total, _ZERO, thresholds),
+                balance_impact=_ZERO,
             ),
         )
 
