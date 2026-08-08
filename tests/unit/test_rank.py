@@ -239,13 +239,13 @@ class TestAggregateTrivial:
                 severity=Severity.NORMAL,
                 amount="10.00",
                 impact="10.00",
-            ),
+            ).model_copy(update={"ledger_rows": [1]}),
             _finding(
                 code=FindingCode.SHIFT_ROUNDING,
                 severity=Severity.NORMAL,
                 amount="20.00",
                 impact="20.00",
-            ),
+            ).model_copy(update={"ledger_rows": [2]}),
         ]
         scored = [item.model_copy(update={"materiality": Materiality.TRIVIAL}) for item in findings]
         result = aggregate_trivial(scored, thresholds)
@@ -264,6 +264,22 @@ class TestAggregateTrivial:
         result = aggregate_trivial(scored, thresholds)
         assert len(result) == 2
         assert all(item.severity is Severity.ERROR for item in result)
+
+    def test_untraceable_finding_is_not_folded(self, config: Config) -> None:
+        """§13.7: свёрнутая строка наследует строки и обошла бы фильтр раскладки.
+
+        На Солигорске «мелкие расхождения, 72 шт.» несли ровно −807,91 —
+        дисбаланс логов, который §16 объявляет необъяснимым по этой выгрузке, и
+        который из причинной раскладки убран намеренно.
+        """
+        thresholds = materiality_thresholds(BENCHMARK, config)
+        findings = [
+            _finding(code=FindingCode.LOG_IMBALANCE, severity=Severity.INFO, impact="-807.91"),
+            _finding(code=FindingCode.LOG_IMBALANCE, severity=Severity.INFO, impact="-1.00"),
+        ]
+        scored = [item.model_copy(update={"materiality": Materiality.TRIVIAL}) for item in findings]
+
+        assert aggregate_trivial(scored, thresholds) == tuple(scored)
 
     def test_single_trivial_is_not_folded(self, config: Config) -> None:
         thresholds = materiality_thresholds(BENCHMARK, config)

@@ -282,10 +282,17 @@ def aggregate_trivial(
     Агрегация сжимает хвост, а не переклассифицирует находки.
     """
     foldable = {Severity.NORMAL, Severity.INFO}
+    # Находка без трассировки до строк файла не сворачивается: свёрнутая строка
+    # наследует строки от остальных участников и тем самым проходит фильтр
+    # §13.7, возвращая в причинную раскладку то, что из неё намеренно убрано.
+    # На Солигорске «мелкие расхождения, 72 шт.» несли ровно −807,91 —
+    # дисбаланс логов, который §16 объявляет необъяснимым по этой выгрузке.
     trivial = [
         item
         for item in findings
-        if item.materiality is Materiality.TRIVIAL and item.severity in foldable
+        if item.materiality is Materiality.TRIVIAL
+        and item.severity in foldable
+        and (item.ledger_rows or item.ops_rows)
     ]
     if len(trivial) < _MIN_TO_AGGREGATE:
         return tuple(findings)
