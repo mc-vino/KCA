@@ -144,6 +144,9 @@ class Materiality(StrEnum):
     TRIVIAL = "ТРИВИАЛЬНО"
 
 
+_ZERO = Decimal("0.00")
+
+
 class FindingCode(StrEnum):
     """Таксономия находок — §8. Коды латиницей (§12)."""
 
@@ -670,6 +673,8 @@ class CausalLine(_Frozen):
     title: str
     finding_index: int | None
     doc_numbers: tuple[str, ...]
+    is_residual: bool = False
+    """Строка «не локализовано»: она не сторона раскладки, а её незакрытая часть."""
 
 
 class Waterfall(_Frozen):
@@ -689,6 +694,32 @@ class Waterfall(_Frozen):
     log_imbalance: Decimal
     unresolved: Decimal
     causal_lines: tuple[CausalLine, ...]
+
+    def overstated(self) -> Decimal:
+        """Переучтённое: строки, где 1С провела лишнее — §5.6.
+
+        Знак отрицательный: лишняя проводка по кредиту 50.2 уносит рубли из
+        сальдо.
+        """
+        return sum(
+            (
+                line.amount
+                for line in self.causal_lines
+                if line.amount < _ZERO and not line.is_residual
+            ),
+            _ZERO,
+        )
+
+    def understated(self) -> Decimal:
+        """Недоучтённое: строки, где 1С провела меньше факта — §5.6."""
+        return sum(
+            (
+                line.amount
+                for line in self.causal_lines
+                if line.amount > _ZERO and not line.is_residual
+            ),
+            _ZERO,
+        )
 
 
 # --------------------------------------------------------------------------- #

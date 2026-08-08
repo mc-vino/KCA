@@ -122,8 +122,26 @@ def _sheet_cause(workbook: Workbook, result: AnalysisResult) -> None:
     sheet = _new_sheet(workbook, SHEETS[0])
     write_row(sheet, ["Причинная раскладка отклонения сальдо"], bold=True)
     write_row(sheet, ["Сумма", "Причина", "Документы"], bold=True)
-    for line in result.waterfall.causal_lines:
-        write_row(sheet, [line.amount, line.title, ", ".join(line.doc_numbers)])
+
+    # Две стороны раскладки, как их называет §5.6: переучтённое и недоучтённое.
+    # Плоским списком раскладка нечитаема на кассах со встречными потоками — на
+    # Солигорске переучтено −10 946,54 при недоучтённых +2 893,74 и полном
+    # отклонении −1 224,80.
+    waterfall = result.waterfall
+    named = [line for line in waterfall.causal_lines if not line.is_residual]
+    for caption, total, side in (
+        ("Переучтено в 1С — проведено больше факта", waterfall.overstated(), True),
+        ("Недоучтено в 1С — проведено меньше факта", waterfall.understated(), False),
+    ):
+        block = [line for line in named if (line.amount < 0) is side]
+        if not block:
+            continue
+        write_row(sheet, [total, caption], bold=True, fill=COLORS["lime_bg"])
+        for line in block:
+            write_row(sheet, [line.amount, line.title, ", ".join(line.doc_numbers)])
+    for line in waterfall.causal_lines:
+        if line.is_residual:
+            write_row(sheet, [line.amount, line.title], fill=COLORS["amber_bg"])
     write_row(sheet, [])
     write_row(
         sheet,

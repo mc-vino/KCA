@@ -178,6 +178,7 @@ def causal_decomposition(
                 ),
                 finding_index=None,
                 doc_numbers=(),
+                is_residual=True,
             ),
         )
     return tuple(lines)

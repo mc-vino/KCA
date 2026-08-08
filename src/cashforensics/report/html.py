@@ -43,20 +43,57 @@ def _esc(value: object) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
-def render_section_cause(result: AnalysisResult) -> str:
-    """Секция «Причина» — причинная раскладка без остатка (§5.10, §9.1.1)."""
-    rows = "".join(
+def _cause_rows(lines: object, caption: str, total: object) -> str:
+    """Блок раскладки с подытогом — §5.6, §9.1.1."""
+    body = "".join(
         f"<tr><td class='num'>{_esc(line.amount)}</td><td>{_esc(line.title)}</td>"
         f"<td>{_esc(', '.join(line.doc_numbers))}</td></tr>"
-        for line in result.waterfall.causal_lines
+        for line in lines  # type: ignore[attr-defined]
+    )
+    if not body:
+        return ""
+    return (
+        f"<tr class='normal'><td class='num'><strong>{_esc(total)}</strong></td>"
+        f"<td colspan='2'><strong>{_esc(caption)}</strong></td></tr>{body}"
+    )
+
+
+def render_section_cause(result: AnalysisResult) -> str:
+    """Секция «Причина» — причинная раскладка без остатка (§5.10, §9.1.1).
+
+    Раскладка показывается **двумя сторонами**, как их называет §5.6:
+    переучтённое и недоучтённое. Одной колонкой она нечитаема на кассах со
+    встречными потоками: на Солигорске переучтено −10 946,54 при недоучтённых
+    +2 893,74 и полном отклонении −1 224,80, и плоский список выглядел так,
+    будто отклонение в девять раз больше, чем оно есть.
+    """
+    waterfall = result.waterfall
+    named = [line for line in waterfall.causal_lines if not line.is_residual]
+    residual = [line for line in waterfall.causal_lines if line.is_residual]
+    rows = (
+        _cause_rows(
+            [line for line in named if line.amount < 0],
+            "Переучтено в 1С — проведено больше факта",
+            waterfall.overstated(),
+        )
+        + _cause_rows(
+            [line for line in named if line.amount > 0],
+            "Недоучтено в 1С — проведено меньше факта",
+            waterfall.understated(),
+        )
+        + "".join(
+            f"<tr class='review'><td class='num'>{_esc(line.amount)}</td>"
+            f"<td colspan='2'>{_esc(line.title)}</td></tr>"
+            for line in residual
+        )
     )
     return (
         "<h2>Причина отклонения сальдо</h2>"
         "<table><tr><th>Сумма</th><th>Причина</th><th>Документы</th></tr>"
         f"{rows}</table>"
-        f"<p><strong>Сальдо на конец:</strong> {_esc(result.waterfall.closing)}, "
-        f"целевое {_esc(result.waterfall.target)}, "
-        f"несведённый остаток {_esc(result.waterfall.unresolved)}.</p>"
+        f"<p><strong>Сальдо на конец:</strong> {_esc(waterfall.closing)}, "
+        f"целевое {_esc(waterfall.target)}, "
+        f"несведённый остаток {_esc(waterfall.unresolved)}.</p>"
     )
 
 
