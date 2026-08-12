@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -27,7 +29,7 @@ from openpyxl import load_workbook
 from typer.testing import CliRunner
 
 from cashforensics.cli import app, run_pipeline
-from cashforensics.models import Config, FindingCode
+from cashforensics.models import Config, FindingCode, load_config
 from cashforensics.report.excel import SHEETS, render_excel
 from cashforensics.report.json_out import render_json
 from tests.conftest import OpsRecord, Posting, SheetPlan
@@ -296,15 +298,147 @@ class TestDeterminism:
         assert first == second
 
 
+SUM_RANGE_RE = re.compile(r"^=SUM\(([A-Z]+)(\d+):[A-Z]+(\d+)\)$")
+"""Итог §9.1.8 с разобранным диапазоном — нужен для сверки пересчёта."""
+
+CELL_ERROR_PREFIXES = ("#", "Err:")
+"""Как Excel и Calc показывают несчитаемую формулу: ``#VALUE!``, ``Err:508``."""
+
+
+def _probe_workbook(path: Path) -> Path:
+    """Заведомо исправная книга с одной формулой — пробник окружения."""
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.worksheets[0]
+    sheet["A1"], sheet["A2"], sheet["A3"] = 1, 2, "=SUM(A1:A2)"
+    workbook.save(path)
+    return path
+
+
+def _recalculate(source: Path, out_dir: Path) -> Path | None:
+    """Пересчитать книгу LibreOffice; ``None`` — пакет не сработал.
+
+    Пересчёт настоящий: `openpyxl` кэш формул не пишет, поэтому Calc обязан
+    вычислить их сам, и в выходном файле лежат уже посчитанные значения.
+    """
+    soffice = shutil.which("soffice")
+    if soffice is None:
+        return None
+    profile = out_dir / "профиль"
+    command = [
+        soffice,
+        "--headless",
+        "--norestore",
+        f"-env:UserInstallation={profile.as_uri()}",
+        "--convert-to",
+        "xlsx:Calc MS Excel 2007 XML",
+        "--outdir",
+        str(out_dir),
+        str(source),
+    ]
+    completed = subprocess.run(command, capture_output=True, timeout=300, check=False)  # noqa: S603
+    result = out_dir / source.name
+    if completed.returncode != 0 or not result.exists():
+        return None
+    return result
+
+
 class TestExcelOpensClean:
     """§13.6 — Excel открывается без ошибок формул.
 
-    Настоящий пересчёт (§9.1: «после сохранения — прогон пересчёта формул»)
-    здесь не выполняется: в окружении нет работающего офисного пакета. Поэтому
-    проверяется то, что проверяемо статически: единственные формулы отчёта —
+    Два уровня. Статический работает всегда: единственные формулы отчёта —
     объявленные §9.1.8 итоги ``=SUM()``, их диапазоны лежат внутри данных, и ни
-    одна текстовая ячейка формулой не стала.
+    одна текстовая ячейка формулой не стала. Динамический (§9.1: «после
+    сохранения — прогон пересчёта формул») требует LibreOffice Calc и при его
+    отсутствии пропускается **с явной причиной**.
+
+    Пропуск отделён от дефекта пробником: сначала пересчитывается заведомо
+    исправная книга из трёх ячеек. Не сработала она — виновато окружение, тест
+    пропускается; сработала, а отчёт нет — это дефект отчёта, и тест падает.
+    Без пробника сломанный отчёт молча выглядел бы как «нет офисного пакета».
     """
+
+    @staticmethod
+    def _report(register: Path, tmp_path: Path) -> Path:
+        out = tmp_path / "пересчёт"
+        out.mkdir(parents=True, exist_ok=True)
+        result = render_excel(run_pipeline(register, load_config(CONFIG_PATH)), out / "отчёт.xlsx")
+        assert result.exists()
+        return result
+
+    def test_recalculation_leaves_no_error_cells(
+        self,
+        register: Path,
+        tmp_path: Path,
+    ) -> None:
+        """§13.6, §9.1: после пересчёта в книге нет ни одной ``#VALUE!``.
+
+        Проверяются **все** листы §9.1, а не первый: ловушка ведущего ``=``
+        лежит в тексте объяснений, а он рассыпан по отчёту целиком.
+        """
+        probe = _recalculate(_probe_workbook(tmp_path / "пробник.xlsx"), tmp_path / "проба")
+        if probe is None:
+            pytest.skip(
+                "LibreOffice Calc недоступен: пересчёт формул §13.6 не проверен. "
+                "Установите libreoffice-calc — одного libreoffice-core мало, "
+                "без фильтра таблиц не открывается ни одна книга",
+            )
+
+        recalculated = _recalculate(self._report(register, tmp_path), tmp_path / "готово")
+        assert recalculated is not None, "пробник пересчитался, а отчёт — нет: дефект отчёта"
+
+        workbook = load_workbook(recalculated, data_only=True)
+        broken = [
+            (sheet.title, cell.coordinate, cell.value)
+            for sheet in workbook.worksheets
+            for row in sheet.iter_rows()
+            for cell in row
+            if isinstance(cell.value, str) and cell.value.startswith(CELL_ERROR_PREFIXES)
+        ]
+        workbook.close()
+        assert broken == []
+
+    def test_recalculated_totals_match_their_ranges(
+        self,
+        register: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Итог §9.1.8 обязан сойтись с суммой своего диапазона.
+
+        «Формула без ошибки» и «формула считает то, что нужно» — разные
+        утверждения: ``=SUM()`` со сдвинутым на строку диапазоном не даёт
+        ``#VALUE!``, он молча даёт другое число.
+        """
+        probe = _recalculate(_probe_workbook(tmp_path / "пробник.xlsx"), tmp_path / "проба")
+        if probe is None:
+            pytest.skip("LibreOffice Calc недоступен: пересчёт формул §13.6 не проверен")
+
+        report = self._report(register, tmp_path)
+        recalculated = _recalculate(report, tmp_path / "готово")
+        assert recalculated is not None, "пробник пересчитался, а отчёт — нет: дефект отчёта"
+
+        written = load_workbook(report)
+        computed = load_workbook(recalculated, data_only=True)
+        checked = 0
+        for sheet in written.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if not isinstance(cell.value, str) or not cell.value.startswith("="):
+                        continue
+                    match = SUM_RANGE_RE.match(cell.value)
+                    assert match, cell.value
+                    column, first, last = match.group(1), int(match.group(2)), int(match.group(3))
+                    expected = sum(
+                        Decimal(str(sheet[f"{column}{index}"].value or 0))
+                        for index in range(first, last + 1)
+                    )
+                    actual = Decimal(str(computed[sheet.title][cell.coordinate].value))
+                    assert actual == expected, f"{sheet.title}!{cell.coordinate}: {cell.value}"
+                    checked += 1
+        written.close()
+        computed.close()
+        assert checked > 0, "в отчёте не нашлось ни одного итога §9.1.8 — проверять нечего"
 
     def test_only_declared_sum_totals_are_formulas(
         self,
