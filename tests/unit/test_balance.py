@@ -22,12 +22,21 @@ from cashforensics.decompose import build_waterfall, check_tie, decompose, other
 from cashforensics.models import (
     Category,
     CategoryRecon,
+    CausalLevel,
     ClassifyResult,
     Config,
+    Finding,
+    FindingCode,
     LedgerEntry,
+    LocalizationResult,
+    LocalizationStatus,
+    Materiality,
     OpsClass,
     OpsEntry,
+    PostingMode,
+    Severity,
     TargetBalanceRule,
+    Waterfall,
 )
 from tests.unit.test_classify import ledger_entry, ops_entry
 
@@ -407,3 +416,205 @@ class TestWaterfall:
 
         total = sum((line.amount for line in waterfall.causal_lines), ZERO)
         assert total == waterfall.closing - waterfall.target
+
+
+def _refusal(
+    *,
+    status: LocalizationStatus,
+    impact: str,
+    category: Category = Category.INCOME,
+    rows: tuple[int, ...] = (1,),
+) -> LocalizationResult:
+    """Отказ локализации §5.9 — без кода §8, но с влиянием на сальдо."""
+    return LocalizationResult(
+        date=_day(0),
+        category=category,
+        mode=PostingMode.DAILY_AGGREGATE,
+        status=status,
+        code=None,
+        amount=abs(Decimal(impact)),
+        balance_impact=Decimal(impact),
+        ledger_rows=rows,
+        ops_rows=(),
+        doc_numbers=(),
+        gates=None,
+        confidence=0.0,
+        explanation="тест",
+    )
+
+
+class TestCausalLevels:
+    """§5.10, §7.4: до какого уровня раскладка доказана."""
+
+    @staticmethod
+    def _decompose(
+        classified: ClassifyResult,
+        config: Config,
+        *,
+        findings: tuple[Finding, ...] = (),
+        localizations: tuple[LocalizationResult, ...] = (),
+        recon: dict[Category, CategoryRecon] | None = None,
+    ) -> Waterfall:
+        totals = recon or {
+            Category.INCOME: _recon(Category.INCOME, ZERO),
+            Category.COLLECTION: _recon(Category.COLLECTION, ZERO),
+            Category.REFUND: _recon(Category.REFUND, ZERO),
+        }
+        return decompose(
+            totals,
+            balance_trace(classified, ZERO, config),
+            classified,
+            findings,
+            localizations,
+        )
+
+    def test_refusal_below_z_report_is_named_by_day(self, config: Config) -> None:
+        """§7.4 отказывает в документе, но не в дне: строка обязана быть.
+
+        До этого весь отказ §7.4 уходил в «не локализовано»: на Щучине одна
+        строка покрывала все −4 952,36, хотя остановка прихода 07–12.05.2026
+        известна поимённо.
+        """
+        classified = _classified((_income(1, _day(0), Decimal("1000.00")),))
+        recon = {
+            Category.INCOME: _recon(Category.INCOME, Decimal("1000.00")),
+            Category.COLLECTION: _recon(Category.COLLECTION, ZERO),
+            Category.REFUND: _recon(Category.REFUND, ZERO),
+        }
+        refusal = _refusal(
+            status=LocalizationStatus.REFUSED_BELOW_Z_REPORT,
+            impact="1000.00",
+        )
+
+        waterfall = self._decompose(
+            classified,
+            config,
+            localizations=(refusal,),
+            recon=recon,
+        )
+
+        named = [line for line in waterfall.causal_lines if line.level is CausalLevel.DAY]
+        assert [line.amount for line in named] == [Decimal("1000.00")]
+        assert not [line for line in waterfall.causal_lines if line.is_residual]
+
+    def test_gate_refusal_stays_in_the_residual(self, config: Config) -> None:
+        """§7.3: закрывшийся гейт — отсутствие утверждения, а не утверждение.
+
+        Такие отказы односторонни по построению (§4.3 даёт непроведённой выдаче
+        нулевое влияние), и их сумма меряет перекос выборки: на Максиму_касса_2
+        280 таких дней давали −1 174 824,55 при нетто категории −217 581,09.
+        """
+        classified = _classified((_refund(1, _day(0), Decimal("500.00")),))
+        recon = {
+            Category.INCOME: _recon(Category.INCOME, ZERO),
+            Category.COLLECTION: _recon(Category.COLLECTION, ZERO),
+            Category.REFUND: _recon(Category.REFUND, Decimal("500.00")),
+        }
+        refusal = _refusal(
+            status=LocalizationStatus.AMBIGUOUS,
+            impact="-500.00",
+            category=Category.REFUND,
+        )
+
+        waterfall = self._decompose(
+            classified,
+            config,
+            localizations=(refusal,),
+            recon=recon,
+        )
+
+        assert not [line for line in waterfall.causal_lines if line.level is CausalLevel.DAY]
+        residual = [line for line in waterfall.causal_lines if line.is_residual]
+        assert [line.amount for line in residual] == [Decimal("-500.00")]
+
+    def test_other_flows_are_a_structural_line(self, config: Config) -> None:
+        """§5.10: «размен между кассами + округления смены» — своя строка.
+
+        Эталон §5.10 приводит её для PAX_119023531 как +112,67. Расхождением
+        учёта она не является, поэтому в стороны §5.6 не входит.
+        """
+        ledger = (
+            ledger_entry(
+                row=1,
+                day=_day(0),
+                debit=Decimal("119.00"),
+                account="76.9.1",
+                category=Category.OTHER,
+            ),
+        )
+        classified = _classified(ledger)
+
+        waterfall = self._decompose(classified, config)
+
+        structure = [line for line in waterfall.causal_lines if line.level is CausalLevel.STRUCTURE]
+        assert [line.amount for line in structure] == [Decimal("119.00")]
+        assert waterfall.structural() == Decimal("119.00")
+        assert waterfall.overstated() == ZERO
+        assert waterfall.understated() == ZERO
+
+    def test_finding_and_its_day_are_not_counted_twice(self, config: Config) -> None:
+        """Задвоенный ПКО и отказ §7.4 за тот же день — одни и те же рубли.
+
+        На PAX_119023531 R87/R101 от 05.06.2023 (+1 400,00) попадали в раскладку
+        дважды: строкой находки и строкой дня, и остаток уходил в минус.
+        """
+        classified = _classified((_income(1, _day(0), Decimal("1400.00")),))
+        recon = {
+            Category.INCOME: _recon(Category.INCOME, Decimal("1400.00")),
+            Category.COLLECTION: _recon(Category.COLLECTION, ZERO),
+            Category.REFUND: _recon(Category.REFUND, ZERO),
+        }
+        finding = Finding(
+            code=FindingCode.PKO_DOUBLE_BOOKED,
+            severity=Severity.ERROR,
+            date=_day(0),
+            amount=Decimal("1400.00"),
+            ledger_rows=[1],
+            title="Задвоенный приход 1400.00",
+            explanation="тест",
+            confidence=1.0,
+            materiality=Materiality.MATERIAL,
+            balance_impact=Decimal("1400.00"),
+        )
+        refusal = _refusal(
+            status=LocalizationStatus.REFUSED_BELOW_Z_REPORT,
+            impact="1400.00",
+        )
+
+        waterfall = self._decompose(
+            classified,
+            config,
+            findings=(finding,),
+            localizations=(refusal,),
+            recon=recon,
+        )
+
+        assert [line.level for line in waterfall.causal_lines] == [CausalLevel.DOCUMENT]
+        assert waterfall.understated() == Decimal("1400.00")
+
+    def test_missing_block_is_named_in_the_residual(self, config: Config) -> None:
+        """Вариант D §3.3: непроверенное не выдаётся за измеренное (§11.3).
+
+        Без блока ПКО «дисбаланс логов» вырождается в минус всю сумму РКО. На
+        Кса_норма это −632 848,10 при отклонении сальдо +10 632,25 — величина,
+        которой никто не измерял.
+        """
+        classified = _classified(
+            (_income(1, _day(0), Decimal("1000.00")),),
+            ops=(ops_entry(row=1, moment=datetime(2024, 2, 1, 12, 0), amount=Decimal("400.00")),),
+        )
+        recon = {
+            Category.INCOME: _recon(Category.INCOME, Decimal("1000.00")).model_copy(
+                update={"verifiable": False},
+            ),
+            Category.COLLECTION: _recon(Category.COLLECTION, ZERO),
+            Category.REFUND: _recon(Category.REFUND, ZERO),
+        }
+
+        waterfall = self._decompose(classified, config, recon=recon)
+
+        assert waterfall.log_imbalance != ZERO
+        assert not [line for line in waterfall.causal_lines if line.level is CausalLevel.STRUCTURE]
+        residual = next(line for line in waterfall.causal_lines if line.is_residual)
+        assert "блока опер-лога" in residual.title
+        assert Category.INCOME.value in residual.title

@@ -39,6 +39,7 @@ __all__ = [
     "CalendarConfig",
     "Category",
     "CategoryRecon",
+    "CausalLevel",
     "CausalLine",
     "ChangePointWindow",
     "ChangepointConfig",
@@ -185,12 +186,17 @@ class LocalizationStatus(StrEnum):
     ``EXPLAINED_BY_REVERSAL`` — день объяснён, но своего кода §8 не имеет:
     расхождение целиком принадлежит находке §5.5, и второй раз называть те же
     рубли нельзя.
+
+    ``EXPLAINED_BY_TIMING`` — то же самое для §5.9.2: обе стороны дня разобраны
+    сопоставлением 1:1, партнёры лежат на соседних датах. Расхождения нет, есть
+    датировка.
     """
 
     LOCALIZED = "ЛОКАЛИЗОВАНО"
     PROBABLE = "ВЕРОЯТНО"
     AMBIGUOUS = "AMBIGUOUS"
     EXPLAINED_BY_REVERSAL = "ОБЪЯСНЕНО_СТОРНО"
+    EXPLAINED_BY_TIMING = "ОБЪЯСНЕНО_ТАЙМИНГОМ"
     NOT_LOCALIZED = "НЕ_ЛОКАЛИЗОВАНО"
     REFUSED_CANDIDATE_COUNT = "ОТКАЗ_ЧИСЛО_КАНДИДАТОВ"
     REFUSED_DENSITY = "ОТКАЗ_ПЛОТНОСТЬ"
@@ -663,18 +669,50 @@ class MaterialityThresholds(_Frozen):
     trivial: Decimal
 
 
+class CausalLevel(StrEnum):
+    """До какого уровня строка раскладки доказана — §5.10, §7.4.
+
+    §7.4 запрещает локализацию **ниже дневного агрегата продаж**, а не саму
+    локализацию: день и категория остаются названными, и величина известна
+    точно. Разница между «названо до документа» и «названо до дня» — это
+    разница в доказательной базе, а не в достоверности суммы, и отчёт обязан
+    её показывать, а не сваливать всё недоказанное в одну строку.
+
+    ``STRUCTURE`` — слагаемые тождества §5.10, которые расхождением учёта не
+    являются: прочие потоки (размен между кассами, расчёты по 76.9.1) и
+    дисбаланс самих логов. §5.10 требует выводить последний отдельной строкой.
+    """
+
+    DOCUMENT = "ДОКУМЕНТ"
+    DAY = "ДЕНЬ"
+    CATEGORY = "КАТЕГОРИЯ"
+    STRUCTURE = "СТРУКТУРА"
+    RESIDUAL = "ОСТАТОК"
+
+
 class CausalLine(_Frozen):
     """Строка причинной раскладки — §5.10.
 
-    Каждая строка обязана ссылаться на ``Finding`` с трассировкой.
+    Строка уровня ``DOCUMENT`` обязана ссылаться на ``Finding`` с трассировкой.
+    Строки прочих уровней трассируются до дня, категории или слагаемого
+    тождества §5.10 — см. :class:`CausalLevel`.
     """
 
     amount: Decimal
     title: str
     finding_index: int | None
     doc_numbers: tuple[str, ...]
-    is_residual: bool = False
-    """Строка «не локализовано»: она не сторона раскладки, а её незакрытая часть."""
+    level: CausalLevel = CausalLevel.DOCUMENT
+
+    @property
+    def is_residual(self) -> bool:
+        """Строка «не локализовано»: не сторона раскладки, а её незакрытая часть."""
+        return self.level is CausalLevel.RESIDUAL
+
+    @property
+    def is_deviation(self) -> bool:
+        """Строка расхождения учёта, а не структурное слагаемое §5.10."""
+        return self.level not in {CausalLevel.STRUCTURE, CausalLevel.RESIDUAL}
 
 
 class Waterfall(_Frozen):
@@ -696,28 +734,38 @@ class Waterfall(_Frozen):
     causal_lines: tuple[CausalLine, ...]
 
     def overstated(self) -> Decimal:
-        """Переучтённое: строки, где 1С провела лишнее — §5.6.
+        """Строки, занижающие сальдо 1С относительно факта — §5.6.
 
-        Знак отрицательный: лишняя проводка по кредиту 50.2 уносит рубли из
-        сальдо.
+        Знак отрицательный. Что именно занижает — зависит от категории: лишняя
+        проводка возврата уносит рубли из сальдо, непроведённый приход их туда
+        не приносит. Поэтому заголовок блока говорит о направлении **сальдо**,
+        а не о том, «больше или меньше провели»: для прихода и для выдач эти
+        два прочтения противоположны.
         """
         return sum(
             (
                 line.amount
                 for line in self.causal_lines
-                if line.amount < _ZERO and not line.is_residual
+                if line.amount < _ZERO and line.is_deviation
             ),
             _ZERO,
         )
 
     def understated(self) -> Decimal:
-        """Недоучтённое: строки, где 1С провела меньше факта — §5.6."""
+        """Строки, завышающие сальдо 1С относительно факта — §5.6."""
         return sum(
             (
                 line.amount
                 for line in self.causal_lines
-                if line.amount > _ZERO and not line.is_residual
+                if line.amount > _ZERO and line.is_deviation
             ),
+            _ZERO,
+        )
+
+    def structural(self) -> Decimal:
+        """Структурные слагаемые §5.10: прочие потоки и дисбаланс логов."""
+        return sum(
+            (line.amount for line in self.causal_lines if line.level is CausalLevel.STRUCTURE),
             _ZERO,
         )
 

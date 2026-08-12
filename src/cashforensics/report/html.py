@@ -8,9 +8,11 @@ CDN-шрифтов. Палитра и формулировки — те же, ч
 from __future__ import annotations
 
 import html
+from collections.abc import Sequence
+from decimal import Decimal
 from pathlib import Path
 
-from cashforensics.models import AnalysisResult
+from cashforensics.models import AnalysisResult, CausalLevel, CausalLine
 from cashforensics.rank import confidence_label
 from cashforensics.report.excel import COLORS
 
@@ -43,53 +45,73 @@ def _esc(value: object) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
-def _cause_rows(lines: object, caption: str, total: object) -> str:
+def _cause_rows(lines: Sequence[CausalLine], caption: str, total: Decimal) -> str:
     """Блок раскладки с подытогом — §5.6, §9.1.1."""
     body = "".join(
-        f"<tr><td class='num'>{_esc(line.amount)}</td><td>{_esc(line.title)}</td>"
+        f"<tr><td class='num'>{_esc(line.amount)}</td><td>{_esc(line.level.value)}</td>"
+        f"<td>{_esc(line.title)}</td>"
         f"<td>{_esc(', '.join(line.doc_numbers))}</td></tr>"
-        for line in lines  # type: ignore[attr-defined]
+        for line in lines
     )
     if not body:
         return ""
     return (
         f"<tr class='normal'><td class='num'><strong>{_esc(total)}</strong></td>"
-        f"<td colspan='2'><strong>{_esc(caption)}</strong></td></tr>{body}"
+        f"<td colspan='3'><strong>{_esc(caption)}</strong></td></tr>{body}"
     )
 
 
 def render_section_cause(result: AnalysisResult) -> str:
     """Секция «Причина» — причинная раскладка без остатка (§5.10, §9.1.1).
 
-    Раскладка показывается **двумя сторонами**, как их называет §5.6:
-    переучтённое и недоучтённое. Одной колонкой она нечитаема на кассах со
-    встречными потоками: на Солигорске переучтено −10 946,54 при недоучтённых
-    +2 893,74 и полном отклонении −1 224,80, и плоский список выглядел так,
-    будто отклонение в девять раз больше, чем оно есть.
+    Раскладка показывается **тремя блоками**. Два первых — стороны расхождения
+    §5.6; одной колонкой они нечитаемы на кассах со встречными потоками: на
+    Солигорске завышающие сальдо строки дают −10 946,54 при занижающих +2 893,74
+    и полном отклонении −1 224,80, и плоский список выглядел так, будто
+    отклонение в девять раз больше, чем оно есть.
+
+    Заголовки говорят о направлении **сальдо**, а не о том, «больше или меньше
+    провели»: для прихода и для выдач эти два прочтения противоположны, и
+    единая формулировка «переучтено» врала бы ровно на строках прихода.
+
+    Третий блок — структурные слагаемые §5.10 (прочие потоки и дисбаланс
+    логов). Расхождением учёта они не являются, и смешивать их с ошибками
+    запрещено, но и прятать нельзя: без них раскладка не сходится.
+
+    Колонка «Уровень» отвечает на вопрос, чем строка доказана: документом,
+    днём, категорией или тождеством §5.10. §7.4 запрещает спускаться ниже
+    дневного агрегата продаж — величина при этом остаётся точной, и колонка
+    показывает эту разницу вместо того, чтобы прятать день в общий остаток.
     """
     waterfall = result.waterfall
-    named = [line for line in waterfall.causal_lines if not line.is_residual]
-    residual = [line for line in waterfall.causal_lines if line.is_residual]
+    lines = waterfall.causal_lines
+    deviation = [line for line in lines if line.is_deviation]
     rows = (
         _cause_rows(
-            [line for line in named if line.amount < 0],
-            "Переучтено в 1С — проведено больше факта",
+            [line for line in deviation if line.amount < 0],
+            "Сальдо 1С ниже фактического",
             waterfall.overstated(),
         )
         + _cause_rows(
-            [line for line in named if line.amount > 0],
-            "Недоучтено в 1С — проведено меньше факта",
+            [line for line in deviation if line.amount > 0],
+            "Сальдо 1С выше фактического",
             waterfall.understated(),
+        )
+        + _cause_rows(
+            [line for line in lines if line.level is CausalLevel.STRUCTURE],
+            "Структурные слагаемые §5.10 — не расхождение учёта",
+            waterfall.structural(),
         )
         + "".join(
             f"<tr class='review'><td class='num'>{_esc(line.amount)}</td>"
-            f"<td colspan='2'>{_esc(line.title)}</td></tr>"
-            for line in residual
+            f"<td colspan='3'>{_esc(line.title)}</td></tr>"
+            for line in lines
+            if line.is_residual
         )
     )
     return (
         "<h2>Причина отклонения сальдо</h2>"
-        "<table><tr><th>Сумма</th><th>Причина</th><th>Документы</th></tr>"
+        "<table><tr><th>Сумма</th><th>Уровень</th><th>Причина</th><th>Документы</th></tr>"
         f"{rows}</table>"
         f"<p><strong>Сальдо на конец:</strong> {_esc(waterfall.closing)}, "
         f"целевое {_esc(waterfall.target)}, "

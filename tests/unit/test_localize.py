@@ -543,6 +543,41 @@ class TestMatching:
         assert name_similarity("", "Иванов") == 0.0
         assert name_similarity("Иванов Иван", "Иванов Иван") == 1.0
 
+    def test_fully_paired_day_is_explained_by_timing(self, config: Config) -> None:
+        """Обе стороны дня разобраны парами с соседних дат — расхождения нет.
+
+        Сопоставление §5.9.2 идёт в окне ``DATE_WIN`` по всему периоду, поэтому
+        у дня может остаться дневная разница при том, что каждая его проводка
+        сведена с выдачей, а каждая выдача — с проводкой. Пока ветки не было,
+        такой день падал в subset-sum с пустым списком кандидатов, гейты §7.3
+        закрывались, и день получал отказ с ненулевым влиянием на сальдо. На
+        Максиму_касса_2 таких дней 638 — при том что §11.3 говорит об этой
+        кассе «дискретных ошибок нет».
+        """
+        later = date(2024, 2, 2)
+        ledger = (
+            _refund_posting(1, Decimal("300.00")),
+            _refund_posting(2, Decimal("100.00"), day=later),
+        )
+        ops = (
+            _payout(100, Decimal("100.00")),
+            _payout(101, Decimal("300.00"), day=later),
+        )
+
+        results = localize(
+            _classified(ledger, ops),
+            _no_reversals(),
+            _timing(((DAY, Decimal("200.00")), (later, Decimal("-200.00")))),
+            config,
+        )
+
+        assert [item.status for item in results] == [
+            LocalizationStatus.EXPLAINED_BY_TIMING,
+            LocalizationStatus.EXPLAINED_BY_TIMING,
+        ]
+        assert all(item.balance_impact == ZERO for item in results)
+        assert all(item.code is None for item in results)
+
 
 def test_findings_never_qualify_as_theft(config: Config) -> None:
     """§1.2, §13.10: инструмент не квалифицирует находку как хищение."""

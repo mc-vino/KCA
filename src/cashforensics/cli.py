@@ -111,7 +111,15 @@ def run_pipeline(
     # находок, задвоенный ПКО, срез периода, неизвестные счета и дисбаланс логов
     # не могли попасть в неё в принципе — их строки уходили в «не локализовано».
     waterfall = waterfall.model_copy(
-        update={"causal_lines": causal_decomposition(waterfall, findings, localizations)},
+        update={
+            "causal_lines": causal_decomposition(
+                waterfall,
+                findings,
+                localizations,
+                classified,
+                reconciliation,
+            ),
+        },
     )
 
     meta = ingested.meta.model_copy(update={"actual_period": period})

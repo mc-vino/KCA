@@ -19,7 +19,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
-from cashforensics.models import AnalysisResult, LocalizationStatus, Severity
+from cashforensics.models import AnalysisResult, CausalLevel, LocalizationStatus, Severity
 from cashforensics.rank import confidence_label
 
 __all__ = [
@@ -121,27 +121,49 @@ def _sheet_cause(workbook: Workbook, result: AnalysisResult) -> None:
     """Лист «Причина» — §9.1.1. Ответ на главный вопрос."""
     sheet = _new_sheet(workbook, SHEETS[0])
     write_row(sheet, ["Причинная раскладка отклонения сальдо"], bold=True)
-    write_row(sheet, ["Сумма", "Причина", "Документы"], bold=True)
+    write_row(sheet, ["Сумма", "Уровень", "Причина", "Документы"], bold=True)
 
-    # Две стороны раскладки, как их называет §5.6: переучтённое и недоучтённое.
-    # Плоским списком раскладка нечитаема на кассах со встречными потоками — на
-    # Солигорске переучтено −10 946,54 при недоучтённых +2 893,74 и полном
-    # отклонении −1 224,80.
+    # Три блока. Два первых — стороны расхождения §5.6; плоским списком раскладка
+    # нечитаема на кассах со встречными потоками (на Солигорске −10 946,54 против
+    # +2 893,74 при полном отклонении −1 224,80). Заголовки говорят о направлении
+    # сальдо, а не о том, «больше или меньше провели»: для прихода и для выдач
+    # эти прочтения противоположны.
+    #
+    # Третий блок — структурные слагаемые §5.10 (прочие потоки, дисбаланс логов).
+    # Ошибками они не являются, но без них раскладка не сходится.
     waterfall = result.waterfall
-    named = [line for line in waterfall.causal_lines if not line.is_residual]
-    for caption, total, side in (
-        ("Переучтено в 1С — проведено больше факта", waterfall.overstated(), True),
-        ("Недоучтено в 1С — проведено меньше факта", waterfall.understated(), False),
-    ):
-        block = [line for line in named if (line.amount < 0) is side]
+    lines = waterfall.causal_lines
+    deviation = [line for line in lines if line.is_deviation]
+    blocks = (
+        ("Сальдо 1С ниже фактического", waterfall.overstated()),
+        ("Сальдо 1С выше фактического", waterfall.understated()),
+    )
+    for index, (caption, total) in enumerate(blocks):
+        block = [line for line in deviation if (line.amount < 0) is (index == 0)]
         if not block:
             continue
         write_row(sheet, [total, caption], bold=True, fill=COLORS["lime_bg"])
         for line in block:
-            write_row(sheet, [line.amount, line.title, ", ".join(line.doc_numbers)])
-    for line in waterfall.causal_lines:
+            write_row(
+                sheet,
+                [line.amount, line.level.value, line.title, ", ".join(line.doc_numbers)],
+            )
+    structure = [line for line in lines if line.level is CausalLevel.STRUCTURE]
+    if structure:
+        write_row(
+            sheet,
+            [waterfall.structural(), "Структурные слагаемые §5.10 — не расхождение учёта"],
+            bold=True,
+            fill=COLORS["lime_bg"],
+        )
+        for line in structure:
+            write_row(
+                sheet,
+                [line.amount, line.level.value, line.title, ", ".join(line.doc_numbers)],
+            )
+    for line in lines:
         if line.is_residual:
-            write_row(sheet, [line.amount, line.title], fill=COLORS["amber_bg"])
+            write_row(sheet, [line.amount, line.level.value, line.title], fill=COLORS["amber_bg"])
     write_row(sheet, [])
     write_row(
         sheet,
