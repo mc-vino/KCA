@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import zipfile
 from datetime import date, datetime, timedelta
@@ -153,6 +154,118 @@ class TestFindingsReachTheReport:
         """§5.10: раскладка обязана сходиться без остатка."""
         result = run_pipeline(register, config)
         assert result.unresolved == ZERO
+
+
+class TestNonZeroTarget:
+    """§13.8 — сквозной прогон при ``target_balance ≠ 0``.
+
+    Пол кассы (разменный фонд, который положено оставлять в ящике) делает
+    целевое сальдо ненулевым, и тогда «отклонение» — это ``сальдо − T``, а не
+    само сальдо. Юнит-уровень §5.10 это уже проверял; здесь важно, что через
+    все двенадцать стадий и оба отчёта проходит именно ``T``, а не ноль.
+    """
+
+    @staticmethod
+    def _with_target(config: Config, target: str) -> Config:
+        return config.model_copy(update={"target_balance": Decimal(target)})
+
+    def test_deviation_is_measured_from_the_target(
+        self,
+        register: Path,
+        config: Config,
+    ) -> None:
+        """Сальдо не меняется от T — меняется то, что считается отклонением."""
+        plain = run_pipeline(register, config)
+        raised = run_pipeline(register, self._with_target(config, "500.00"))
+
+        assert raised.waterfall.target == Decimal("500.00")
+        assert raised.waterfall.closing == plain.waterfall.closing
+        assert raised.waterfall.closing - raised.waterfall.target == (
+            plain.waterfall.closing - Decimal("500.00")
+        )
+
+    def test_waterfall_still_ties(self, register: Path, config: Config) -> None:
+        """§13.2: ``|unresolved| < EPS_TIE`` обязано держаться и при T ≠ 0."""
+        result = run_pipeline(register, self._with_target(config, "500.00"))
+
+        assert result.unresolved == ZERO
+        assert abs(result.waterfall.unresolved) < config.thresholds.EPS_TIE
+
+    def test_causal_lines_cover_the_shifted_deviation(
+        self,
+        register: Path,
+        config: Config,
+    ) -> None:
+        """Раскладка обязана покрыть ``сальдо − T``, а не ``сальдо``.
+
+        Разница уходит в остаток: пол кассы не является ни находкой §8, ни
+        слагаемым §5.10 — это заданная величина, а не расхождение.
+        """
+        result = run_pipeline(register, self._with_target(config, "500.00"))
+
+        total = sum((line.amount for line in result.waterfall.causal_lines), ZERO)
+        assert total == result.waterfall.closing - Decimal("500.00")
+
+    def test_cli_target_reaches_both_reports(
+        self,
+        register: Path,
+        tmp_path: Path,
+    ) -> None:
+        """``--target`` §10: величина обязана дойти до Excel и до JSON.
+
+        Каталог отчётов отдельный: фикстура ``register`` кладёт саму выгрузку в
+        ``tmp_path``, и общий glob подобрал бы исходник вместо отчёта.
+        """
+        out = tmp_path / "отчёты"
+        runner = CliRunner()
+        invocation = runner.invoke(
+            app,
+            [
+                "analyze",
+                str(register),
+                "--config",
+                str(CONFIG_PATH),
+                "--target",
+                "500.00",
+                "--out",
+                str(out),
+            ],
+        )
+        assert invocation.exit_code == 0, invocation.output
+
+        payload = json.loads(next(out.glob("*.json")).read_text(encoding="utf-8"))
+        assert payload["waterfall"]["target"] == "500.00"
+
+        workbook = load_workbook(next(out.glob("*.xlsx")))
+        cause = workbook[SHEETS[0]]
+        targets = [
+            row[3]
+            for row in cause.iter_rows(values_only=True)
+            if row and row[0] == "Сальдо на конец"
+        ]
+        workbook.close()
+        assert targets == [Decimal("500.00")]
+
+    def test_non_numeric_target_is_refused(self, register: Path, tmp_path: Path) -> None:
+        """Догадка вместо числа запрещена (§0.3): молчаливый ноль хуже отказа."""
+        out = tmp_path / "отказ"
+        runner = CliRunner()
+        invocation = runner.invoke(
+            app,
+            [
+                "analyze",
+                str(register),
+                "--config",
+                str(CONFIG_PATH),
+                "--target",
+                "пол кассы",
+                "--out",
+                str(out),
+            ],
+        )
+
+        assert invocation.exit_code != 0
+        assert not out.exists() or not list(out.glob("*.xlsx"))
 
 
 class TestDeterminism:
