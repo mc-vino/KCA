@@ -13,11 +13,12 @@
 
 from __future__ import annotations
 
+import random
 import re
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from itertools import pairwise
 
@@ -37,6 +38,7 @@ __all__ = [
     "REPEAT_DISCLAIMER",
     "collect_signatures",
     "count_repeat_groups",
+    "duplicate_baseline",
     "duplicate_documents",
     "iqr_bounds",
     "late_time_documents",
@@ -468,19 +470,80 @@ def repeated_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
     return tuple(signatures)
 
 
-def duplicate_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
+def _same_day_collisions(days: Sequence[date], amounts: Sequence[Decimal]) -> int:
+    """Сколько корзин «день + сумма» содержат больше одной проводки."""
+    counts: Counter[tuple[date, Decimal]] = Counter(zip(days, amounts, strict=True))
+    return sum(1 for value in counts.values() if value >= _MIN_DUPLICATES)
+
+
+def duplicate_baseline(
+    entries: Sequence[LedgerEntry],
+    config: Config,
+) -> tuple[float, float]:
+    """Базовая частота задвоений по счёту — §8.1, перестановочный тест.
+
+    §8.1 требует сопровождать сигнатуру повтора базовой частотой: «повтор может
+    быть законным… требует точечной проверки». Для задвоенного ПКО базовая
+    частота — это ответ на вопрос «а сколько таких совпадений даёт случай?».
+
+    Нуль-модель: те же суммы, те же дни, случайная приписка сумм к проводкам
+    внутри счёта. Перестановки берут ``config.seed`` и ``PERMUTATION_B`` —
+    отдельного порога для этого теста §6 не вводит, и заводить его значило бы
+    подгонять под кассу.
+
+    Returns:
+        ``(ожидаемое число совпадений, p)``. ``p`` — доля перестановок, где
+        совпадений не меньше наблюдённого.
+
+    Что это меряет на калибровочных кассах. Солигорск, счёт 62.4.1: 971
+    проводка на 789 дней, наблюдалось 2 совпадения при ожидаемых 0,61 —
+    p = 0,12, то есть случай объясняет их без остатка, и §11.3 задвоения для
+    этой кассы не называет. `PAX_119023531`, тот же счёт: 81 проводка на 78
+    дней, наблюдалось 1 при ожидаемых 0,05 — p = 0,05, в двадцать раз реже
+    случайного, и §11.3 называет эту пару поимённо (R87/R101 на 1 400,00).
+    Порогом эта величина не служит: §8 оставляет уровень находки за собой, а
+    базовая частота идёт в отчёт контекстом, как и велит §8.1.
+    """
+    days = [entry.date for entry in entries]
+    amounts = [entry.debit for entry in entries]
+    observed = _same_day_collisions(days, amounts)
+    rounds = config.subset_sum.PERMUTATION_B
+    rng = random.Random(config.seed)  # noqa: S311  # не криптография: нуль-модель §8.1
+    pool = list(amounts)
+    total = 0
+    at_least = 0
+    for _ in range(rounds):
+        rng.shuffle(pool)
+        collisions = _same_day_collisions(days, pool)
+        total += collisions
+        at_least += collisions >= observed
+    return (total / rounds, (at_least + 1) / (rounds + 1))
+
+
+def duplicate_documents(
+    ledger: Sequence[LedgerEntry],
+    config: Config,
+) -> tuple[Signature, ...]:
     """Задвоенные приходные ордера — §8, ``PKO_DOUBLE_BOOKED``.
 
     Признак §8: две проводки одной суммы, один день, один счёт, **разные
     номера**. Совпадение номеров означало бы дубликат выгрузки, а не задвоение
     проведения — этот случай разбирает :func:`repeated_documents`.
+
+    Базовая частота §8.1 обязательна и считается по счёту —
+    :func:`duplicate_baseline`. Без неё находка читалась как утверждение: на
+    Солигорске две такие пары (+1 822,12 и +24,87) объясняются случаем при 971
+    авансовой проводке на 789 дней, и §11.3 их не называет.
     """
     buckets: dict[tuple[object, str, Decimal], list[LedgerEntry]] = defaultdict(list)
+    by_account: dict[str, list[LedgerEntry]] = defaultdict(list)
     for entry in ledger:
         if entry.debit <= _ZERO:
             continue
         buckets[(entry.date, entry.counter_account, entry.debit)].append(entry)
+        by_account[entry.counter_account].append(entry)
 
+    baselines: dict[str, tuple[float, float]] = {}
     signatures: list[Signature] = []
     for (day, account, amount), bucket in sorted(
         buckets.items(),
@@ -489,6 +552,9 @@ def duplicate_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
         numbers = {entry.doc_number for entry in bucket if entry.doc_number}
         if len(bucket) < _MIN_DUPLICATES or len(numbers) < _MIN_DUPLICATES:
             continue
+        if account not in baselines:
+            baselines[account] = duplicate_baseline(by_account[account], config)
+        expected, p_value = baselines[account]
         signatures.append(
             Signature(
                 code=FindingCode.PKO_DOUBLE_BOOKED,
@@ -496,7 +562,13 @@ def duplicate_documents(ledger: Sequence[LedgerEntry]) -> tuple[Signature, ...]:
                 date=day,  # type: ignore[arg-type]
                 amount=amount,
                 rows=tuple(sorted(entry.row for entry in bucket)),
-                baseline=None,
+                baseline=(
+                    f"счёт {account} за период — проводок: {len(by_account[account])}, "
+                    f"дней: {len({entry.date for entry in by_account[account]})}. Случайная "
+                    f"приписка тех же сумм к тем же дням даёт {expected:.2f} таких совпадений "
+                    f"(p = {p_value:.4f}). Чем ближе p к единице, тем меньше повод считать "
+                    "совпадение задвоением"
+                ),
                 explanation=(
                     f"{len(bucket)} проводки одной суммы {amount} по счёту {account} "
                     f"за один день под разными номерами ({', '.join(sorted(numbers))}). "
@@ -595,7 +667,7 @@ def collect_signatures(
         *repeat_payouts(classified.ops, config),
         *late_time_documents(classified.ops, config),
         *sequence_gaps(classified.ledger),
-        *duplicate_documents(classified.ledger),
+        *duplicate_documents(classified.ledger, config),
         *repeated_documents(classified.ledger),
         *round_number_bias(classified.ledger, config),
     )

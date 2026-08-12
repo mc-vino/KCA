@@ -21,6 +21,7 @@ import pytest
 from cashforensics.models import Config, FindingCode, OpsEntry, OpsKind, Severity
 from cashforensics.signatures import (
     REPEAT_DISCLAIMER,
+    duplicate_baseline,
     duplicate_documents,
     iqr_bounds,
     late_time_documents,
@@ -185,24 +186,24 @@ class TestSequenceGaps:
 class TestDuplicateDocuments:
     """§8 — ``PKO_DOUBLE_BOOKED``: одна сумма, один день, один счёт, разные номера."""
 
-    def test_same_number_is_not_a_double_booking(self) -> None:
+    def test_same_number_is_not_a_double_booking(self, config: Config) -> None:
         ledger = [
             ledger_entry(row=1, debit=Decimal("100.00"), number="00000000100"),
             ledger_entry(row=2, debit=Decimal("100.00"), number="00000000100"),
         ]
-        assert duplicate_documents(ledger) == ()
+        assert duplicate_documents(ledger, config) == ()
 
-    def test_different_numbers_same_day_and_amount_are_flagged(self) -> None:
+    def test_different_numbers_same_day_and_amount_are_flagged(self, config: Config) -> None:
         ledger = [
             ledger_entry(row=1, debit=Decimal("100.00"), number="00000000100"),
             ledger_entry(row=2, debit=Decimal("100.00"), number="00000000101"),
         ]
-        signatures = duplicate_documents(ledger)
+        signatures = duplicate_documents(ledger, config)
         assert len(signatures) == 1
         assert signatures[0].code is FindingCode.PKO_DOUBLE_BOOKED
         assert signatures[0].rows == (1, 2)
 
-    def test_different_days_are_not_a_double_booking(self) -> None:
+    def test_different_days_are_not_a_double_booking(self, config: Config) -> None:
         ledger = [
             ledger_entry(row=1, day=DAY, debit=Decimal("100.00"), number="00000000100"),
             ledger_entry(
@@ -212,7 +213,35 @@ class TestDuplicateDocuments:
                 number="00000000101",
             ),
         ]
-        assert duplicate_documents(ledger) == ()
+        assert duplicate_documents(ledger, config) == ()
+
+    def test_baseline_is_mandatory_and_names_the_null_model(self, config: Config) -> None:
+        """§8.1: сигнатура повтора обязана нести базовую частоту.
+
+        Без неё находка читается как утверждение. На Солигорске две такие пары
+        (+1 822,12 и +24,87) объясняются случаем — 971 авансовая проводка на
+        789 дней даёт 0,61 такого совпадения при перестановке сумм, и §11.3
+        задвоения для этой кассы не называет. На PAX_119023531 та же проверка
+        даёт 0,05 при одном наблюдённом, и §11.3 называет пару поимённо.
+        """
+        ledger = [
+            ledger_entry(row=1, debit=Decimal("100.00"), number="00000000100"),
+            ledger_entry(row=2, debit=Decimal("100.00"), number="00000000101"),
+        ]
+
+        signature = duplicate_documents(ledger, config)[0]
+
+        assert signature.baseline is not None
+        assert "p = " in signature.baseline
+
+    def test_baseline_is_deterministic(self, config: Config) -> None:
+        """§13.5: перестановки берут ``config.seed``, а не системный ГПСЧ."""
+        entries = [
+            ledger_entry(row=index, day=DAY, debit=Decimal(f"{100 + index % 7}.00"))
+            for index in range(1, 40)
+        ]
+
+        assert duplicate_baseline(entries, config) == duplicate_baseline(entries, config)
 
 
 class TestRoundNumberBias:
