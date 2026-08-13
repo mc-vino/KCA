@@ -190,6 +190,9 @@ class LocalizationStatus(StrEnum):
     ``EXPLAINED_BY_TIMING`` — то же самое для §5.9.2: обе стороны дня разобраны
     сопоставлением 1:1, партнёры лежат на соседних датах. Расхождения нет, есть
     датировка.
+
+    ``OUTSIDE_LEDGER_PERIOD`` — день лежит за последней проводкой карточки 1С.
+    Сверять там нечего: кончилась выгрузка, а не проведение (§5.3, V6).
     """
 
     LOCALIZED = "ЛОКАЛИЗОВАНО"
@@ -197,6 +200,7 @@ class LocalizationStatus(StrEnum):
     AMBIGUOUS = "AMBIGUOUS"
     EXPLAINED_BY_REVERSAL = "ОБЪЯСНЕНО_СТОРНО"
     EXPLAINED_BY_TIMING = "ОБЪЯСНЕНО_ТАЙМИНГОМ"
+    OUTSIDE_LEDGER_PERIOD = "ВНЕ_ПЕРИОДА_1С"
     NOT_LOCALIZED = "НЕ_ЛОКАЛИЗОВАНО"
     REFUSED_CANDIDATE_COUNT = "ОТКАЗ_ЧИСЛО_КАНДИДАТОВ"
     REFUSED_DENSITY = "ОТКАЗ_ПЛОТНОСТЬ"
