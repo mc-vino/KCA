@@ -41,11 +41,14 @@ __all__ = [
     "daily_differences",
     "daily_ledger_series",
     "daily_ops_series",
+    "ledger_period_end",
     "log_imbalance",
     "ops_classes_for",
+    "outside_ledger_period",
     "reconcile",
     "reconcile_category",
     "series_to_pairs",
+    "within_ledger_period",
 ]
 
 RECONCILED_CATEGORIES: tuple[Category, ...] = (
@@ -157,9 +160,13 @@ def reconcile_category(
     reversals: ReversalResult,
     config: Config,
 ) -> CategoryRecon:
-    """Сверка одной категории — §5.6."""
+    """Сверка одной категории — §5.6.
+
+    Ряд лога срезан периодом карточки — см. :func:`within_ledger_period`.
+    """
     acc = daily_ledger_series(classified.ledger, category, reversals.neutralized_rows)
-    ops = daily_ops_series(classified.ops, category, exclude_service=False)
+    inside = within_ledger_period(classified.ops, classified.ledger)
+    ops = daily_ops_series(inside, category, exclude_service=False)
 
     acc_total = sum(acc.values(), _ZERO)
     ops_total = sum(ops.values(), _ZERO)
@@ -179,7 +186,7 @@ def reconcile_category(
     adjusted_net: Decimal | None = None
     adjusted_gross: Decimal | None = None
     if category is Category.REFUND:
-        adjusted_series = daily_ops_series(classified.ops, category, exclude_service=True)
+        adjusted_series = daily_ops_series(inside, category, exclude_service=True)
         adjusted_net = acc_total - sum(adjusted_series.values(), _ZERO)
         adjusted_gross = sum(
             (abs(diff) for _, diff in daily_differences(acc, adjusted_series)),
@@ -188,6 +195,7 @@ def reconcile_category(
 
     reconciled = ops if adjusted_series is None else adjusted_series
     verifiable = block_present(classified.ops, category)
+    beyond = outside_ledger_period(classified.ops, classified.ledger, category)
     differences = daily_differences(acc, reconciled) if verifiable else ()
 
     return CategoryRecon(
@@ -207,6 +215,73 @@ def reconcile_category(
         adjusted_net=adjusted_net,
         adjusted_gross=adjusted_gross,
         verifiable=verifiable,
+        outside_period=beyond,
+    )
+
+
+def ledger_period_end(ledger: Sequence[LedgerEntry]) -> date | None:
+    """Последняя дата карточки 1С — граница сверяемого периода (§5.3)."""
+    return max((entry.date for entry in ledger), default=None)
+
+
+def within_ledger_period(
+    ops: Sequence[OpsEntry],
+    ledger: Sequence[LedgerEntry],
+) -> tuple[OpsEntry, ...]:
+    """Записи лога внутри периода карточки — §5.6, §5.3.
+
+    Сверять можно только там, где есть обе стороны. Записи лога за последней
+    проводкой карточки сравнивать не с чем: отсутствует не проводка, а вся
+    вторая сторона — за этими датами в 1С нет ничего ни по одной категории.
+    Это срез выгрузки §5.3, который V6 и отмечает.
+
+    Что давал несрезанный ряд. `Кса_норма` — эталон §11.3 «без ошибок» — имеет
+    карточку до 30.04.2026 и лог до 02.06.2026, и §5.6 сравнивала пять недель
+    1С против десяти недель лога: инкассация 269 243,54 против 587 835,72,
+    нетто −318 592,18 при отклонении сальдо +10 632,25. Раздутое нетто держало
+    ``ratio`` = 0,59, гейт встречных потоков §5.6 не срабатывал, и день
+    разбирался поштучно — отсюда 69 «непроведённых выдач» и завышенный РКО на
+    16 888,05 на кассе, объявленной безошибочной.
+
+    Со срезом те же величины становятся осмысленными: возвраты сходятся **в
+    ноль**, инкассация даёт −10 632,25 — ровно отклонение сальдо этой кассы.
+
+    Границу задаёт вся карточка, а не категория. Категория, остановленная
+    раньше прочих, — законная находка: на Щучине приход прекращён 06.05.2026,
+    а инкассация проведена до 12.05, и §11.3 требует назвать эти дни
+    (−15 440,69). Их даты лежат внутри карточки и под срез не попадают.
+
+    Тождество §5.10 срез не ломает: все логовые слагаемые в нём сокращаются
+    тождественно, и достаточно применить один и тот же ряд и к дельтам
+    категорий, и к :func:`log_imbalance`.
+    """
+    end = ledger_period_end(ledger)
+    if end is None:
+        return tuple(ops)
+    return tuple(entry for entry in ops if entry.dt.date() <= end)
+
+
+def outside_ledger_period(
+    ops: Sequence[OpsEntry],
+    ledger: Sequence[LedgerEntry],
+    category: Category,
+) -> Decimal:
+    """Сумма записей лога категории за границей карточки — §5.3.
+
+    Молча отбрасывать их нельзя (§5): величина идёт в отчёт как оговорка §16 и
+    в объяснение находки ``PERIOD_CUTOFF``.
+    """
+    end = ledger_period_end(ledger)
+    if end is None:
+        return _ZERO
+    classes = ops_classes_for(category, exclude_service=False)
+    return sum(
+        (
+            entry.amount
+            for entry in ops
+            if entry.classification in classes and entry.dt.date() > end
+        ),
+        _ZERO,
     )
 
 

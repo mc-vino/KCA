@@ -543,61 +543,6 @@ class TestMatching:
         assert name_similarity("", "Иванов") == 0.0
         assert name_similarity("Иванов Иван", "Иванов Иван") == 1.0
 
-    def test_days_past_the_ledger_end_are_outside_the_period(self, config: Config) -> None:
-        """За последней проводкой карточки сверять не с чем — §5.3, V6.
-
-        `Кса_норма` — эталон §11.3 «без ошибок» — выдавала 69 непроведённых
-        выдач, из них 66 за 01.05–02.06.2026 при последней проводке карточки
-        30.04.2026. Отсутствует там не проводка, а вся сторона сравнения.
-        """
-        beyond = date(2024, 2, 8)
-        ledger = (_refund_posting(1, Decimal("300.00")),)
-        ops = (_payout(100, Decimal("300.00")), _payout(101, Decimal("77.00"), day=beyond))
-
-        results = localize(
-            _classified(ledger, ops),
-            _no_reversals(),
-            _timing(((DAY, ZERO), (beyond, Decimal("-77.00")))),
-            config,
-        )
-
-        outside = [r for r in results if r.status is LocalizationStatus.OUTSIDE_LEDGER_PERIOD]
-        assert [item.amount for item in outside] == [Decimal("77.00")]
-        assert all(item.balance_impact == ZERO for item in outside)
-        assert not [r for r in results if r.code is FindingCode.PAYOUT_NOT_BOOKED]
-
-    def test_category_stopping_early_is_still_a_finding(self, config: Config) -> None:
-        """Граница берётся по всей карточке, а не по категории.
-
-        Категория, остановленная раньше прочих, — законная находка: на Щучине
-        приход прекращён 06.05.2026, а инкассация проведена до 12.05, и §11.3
-        требует назвать эти дни (−15 440,69). Взять границу по категории значило
-        бы их потерять.
-        """
-        later = date(2024, 2, 8)
-        ledger = (
-            _refund_posting(1, Decimal("300.00")),
-            # Проводка другой категории продлевает карточку до 08.02.
-            ledger_entry(
-                row=2,
-                day=later,
-                credit=Decimal("500.00"),
-                account="51",
-                category=Category.COLLECTION,
-            ),
-        )
-        ops = (_payout(100, Decimal("42.00"), day=later),)
-
-        results = localize(
-            _classified(ledger, ops),
-            _no_reversals(),
-            _timing(((later, Decimal("-42.00")),)),
-            config,
-        )
-
-        assert not [r for r in results if r.status is LocalizationStatus.OUTSIDE_LEDGER_PERIOD]
-        assert [r.code for r in results] == [FindingCode.PAYOUT_NOT_BOOKED]
-
     def test_fully_paired_day_is_explained_by_timing(self, config: Config) -> None:
         """Обе стороны дня разобраны парами с соседних дат — расхождения нет.
 

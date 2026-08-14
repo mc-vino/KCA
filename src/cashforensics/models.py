@@ -190,9 +190,6 @@ class LocalizationStatus(StrEnum):
     ``EXPLAINED_BY_TIMING`` — то же самое для §5.9.2: обе стороны дня разобраны
     сопоставлением 1:1, партнёры лежат на соседних датах. Расхождения нет, есть
     датировка.
-
-    ``OUTSIDE_LEDGER_PERIOD`` — день лежит за последней проводкой карточки 1С.
-    Сверять там нечего: кончилась выгрузка, а не проведение (§5.3, V6).
     """
 
     LOCALIZED = "ЛОКАЛИЗОВАНО"
@@ -200,7 +197,6 @@ class LocalizationStatus(StrEnum):
     AMBIGUOUS = "AMBIGUOUS"
     EXPLAINED_BY_REVERSAL = "ОБЪЯСНЕНО_СТОРНО"
     EXPLAINED_BY_TIMING = "ОБЪЯСНЕНО_ТАЙМИНГОМ"
-    OUTSIDE_LEDGER_PERIOD = "ВНЕ_ПЕРИОДА_1С"
     NOT_LOCALIZED = "НЕ_ЛОКАЛИЗОВАНО"
     REFUSED_CANDIDATE_COUNT = "ОТКАЗ_ЧИСЛО_КАНДИДАТОВ"
     REFUSED_DENSITY = "ОТКАЗ_ПЛОТНОСТЬ"
@@ -455,6 +451,12 @@ class CategoryRecon(_Frozen):
     adjusted_net: Decimal | None
     adjusted_gross: Decimal | None
     verifiable: bool = True
+    outside_period: Decimal = _ZERO
+    """Сумма записей лога за последней проводкой карточки — §5.3, срез выгрузки.
+
+    В сверку не входит: сравнивать её не с чем. Молча отбрасывать нельзя (§5),
+    поэтому величина идёт в оговорки §16 и в объяснение ``PERIOD_CUTOFF``.
+    """
     """Есть ли встречный ряд опер-лога — §5.6, вариант D §3.3.
 
     ``False`` означает, что блока лога для этой категории в выгрузке нет

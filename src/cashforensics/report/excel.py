@@ -174,6 +174,25 @@ def _sheet_cause(workbook: Workbook, result: AnalysisResult) -> None:
 
     write_row(sheet, [])
     write_row(sheet, ["Что проверить"], bold=True)
+    # §5: тихих пропусков нет. Записи лога за последней проводкой карточки в
+    # сверку не вошли — сравнивать их не с чем, — и умолчать об этом нельзя.
+    for category, recon in sorted(
+        result.reconciliation.items(),
+        key=lambda item: item[0].value,
+    ):
+        if not recon.outside_period:
+            continue
+        write_row(
+            sheet,
+            [
+                (
+                    f"Категория «{category.value}»: {recon.outside_period} опер-лога лежит "
+                    "за последней проводкой карточки 1С и в сверку не вошло — сравнивать "
+                    "эти записи не с чем (§5.3). Это срез выгрузки, а не непроведённые "
+                    "операции; проверяется расширением периода выгрузки 1С."
+                ),
+            ],
+        )
     write_row(
         sheet,
         [

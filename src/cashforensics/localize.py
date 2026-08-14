@@ -1068,58 +1068,6 @@ def _churn_refusal(
     )
 
 
-def _outside_period_refusal(
-    category: Category,
-    days: Sequence[tuple[date, Decimal]],
-    ledger_end: date,
-) -> LocalizationResult | None:
-    """Дни лога за последней проводкой карточки — §5.3, V6.
-
-    Там, где карточка 1С кончилась, сверять нечего: отсутствует не проводка, а
-    вся сторона сравнения. §4.3 требует от ``PAYOUT_NOT_BOOKED`` буквально
-    «этих проводок в 1С нет вовсе» — но здесь в 1С нет вообще ничего за эти
-    даты, ни по одной категории, и это срез выгрузки (§5.3), а не пробел
-    контроля.
-
-    Что это стоило. `Кса_норма` — эталон §11.3 «без ошибок» — выдавала 69
-    непроведённых выдач, из них 66 за 01.05–02.06.2026, при том что последняя
-    проводка карточки датирована 30.04.2026; `Максиму_касса_2` — 93, из них 75
-    за границей. Семь десятков «требует проверки» на заведомо чистой кассе
-    обесценивают отчёт целиком.
-
-    Граница берётся по **всей карточке**, а не по категории, и это
-    принципиально. Категория, остановленная раньше прочих, — законная находка:
-    на Щучине приход прекращён 06.05.2026, а инкассация проведена до 12.05, и
-    §11.3 требует назвать эти дни (−15 440,69). Их даты лежат внутри карточки,
-    и под этот отказ они не попадают.
-
-    Влияние на сальдо — ноль: обороты лога за границей уже учтены категорийной
-    дельтой §5.6, и второй раз те же рубли называть нельзя.
-    """
-    beyond = [(day, diff) for day, diff in days if day > ledger_end]
-    if not beyond:
-        return None
-    total = sum((abs(diff) for _, diff in beyond), _ZERO)
-    return _result(
-        beyond[0][0],
-        category,
-        PostingMode.DAILY_AGGREGATE,
-        LocalizationStatus.OUTSIDE_LEDGER_PERIOD,
-        None,
-        total,
-        _ZERO,
-        (
-            f"Категория «{category.value}»: {len(beyond)} дней опер-лога "
-            f"({beyond[0][0]:%d.%m.%Y}–{beyond[-1][0]:%d.%m.%Y}) на {total} лежат за "
-            f"последней проводкой карточки 1С ({ledger_end:%d.%m.%Y}). Сверять их не с "
-            "чем: за этими датами в 1С нет проводок ни по одной категории — это срез "
-            "выгрузки (§5.3), а не непроведённые операции. Проверяется расширением "
-            "периода выгрузки 1С."
-        ),
-        confidence=0.0,
-    )
-
-
 def localize(
     classified: ClassifyResult,
     reversals: ReversalResult,
@@ -1143,8 +1091,6 @@ def localize(
         Результаты, упорядоченные по ``(категория, дата)`` — §12.
     """
     results: list[LocalizationResult] = []
-    # Граница выгрузки 1С — по всей карточке; см. :func:`_outside_period_refusal`.
-    ledger_end = max((entry.date for entry in classified.ledger), default=date.max)
 
     for category in RECONCILED_CATEGORIES:
         collapse = timing.get(category)
@@ -1186,16 +1132,7 @@ def localize(
         for entry in classified.ledger:
             if entry.category is category and entry.row in reversals.neutralized_rows:
                 reversed_by_day[entry.date].append(entry.row)
-        # §5.3: за последней проводкой карточки сверять не с чем — там кончилась
-        # выгрузка, а не проведение. Граница по всей карточке, а не по категории:
-        # категория, остановленная раньше прочих, остаётся законной находкой.
-        outside = _outside_period_refusal(category, collapse.residual_days, ledger_end)
-        if outside is not None:
-            results.append(outside)
-
         for day, _diff in collapse.residual_days:
-            if day > ledger_end:
-                continue
             results.extend(
                 _localize_day(
                     day,
