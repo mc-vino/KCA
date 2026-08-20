@@ -23,6 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # enablement:true переводит Pages со сборки из ветки на сборку из
+      # Actions. До этого источником был корень `main`, и по адресу висел
+      # старый корневой index.html — переписанный на JS конвейер, считавший
+      # деньги во float и гнавший subset-sum без гейтов §7.3. Без этого шага
+      # `deploy-pages` упал бы, а сайт остался бы прежним.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Установить uv
         uses: astral-sh/setup-uv@v5
         with:
