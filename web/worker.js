@@ -16,6 +16,12 @@
 // того, как страница увидит файл. Сама выгрузка приходит из главного потока
 // буфером и живёт только в памяти (§3.6: блок РКО содержит ФИО получателей).
 
+// Воркер классический, а не модульный (`type: "module"`), хотя модульный
+// выглядел бы современнее. Модульные воркеры появились в Firefox только в 114
+// и в Safari в 15 — на всём, что старше, страница молча не поднималась бы
+// вовсе. `importScripts` работает везде, а Pyodide отдаёт классическую сборку
+// `pyodide.js` рядом с `pyodide.mjs`.
+
 let pyodide = null;
 
 const post = (message) => self.postMessage(message);
@@ -24,8 +30,8 @@ const log = (line) => post({ type: "log", line });
 /** Поднять окружение: Pyodide, колёса, конфигурация §6, модуль `runner`. */
 async function boot(pyodideBase) {
   log("Загружаем Pyodide…");
-  const mod = await import(pyodideBase + "pyodide.mjs");
-  pyodide = await mod.loadPyodide({ indexURL: pyodideBase });
+  self.importScripts(pyodideBase + "pyodide.js");
+  pyodide = await self.loadPyodide({ indexURL: pyodideBase });
 
   log("Ставим numpy, scipy, pydantic, pyyaml…");
   await pyodide.loadPackage(["numpy", "scipy", "pydantic", "pyyaml", "micropip"]);

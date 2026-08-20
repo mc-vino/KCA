@@ -155,7 +155,7 @@ function fail(message) {
 // Конвейер живёт в воркере: на главном потоке Pyodide заморозил бы вкладку на
 // всё время разбора — семьдесят секунд на самой большой из калибровочных касс,
 // — и полоса хода не успела бы перерисоваться ни разу. См. web/worker.js.
-const worker = new Worker("worker.js", { type: "module" });
+const worker = new Worker("worker.js");
 
 function showStage(number, title) {
   $("bar").classList.remove("hidden");
