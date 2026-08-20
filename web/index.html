@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>cashforensics · форензик-анализ кассы ПВЗ</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2334424A'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='19' font-weight='700' text-anchor='middle' fill='%23EAE3D5'%3E%E2%82%BD%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -33,6 +34,10 @@ button{font-family:var(--body);font-weight:600;padding:.55rem 1.1rem;border:1px 
 button:disabled{opacity:.45;cursor:default}
 button.ghost{background:var(--white);color:var(--steel)}
 #log{font-family:var(--mono);font-size:.8rem;white-space:pre-wrap;max-height:15rem;overflow:auto;color:var(--ink2)}
+.bar{height:.5rem;background:var(--surface2);border:1px solid var(--hair);border-radius:99px;overflow:hidden;margin:.75rem 0 .4rem}
+.bar > i{display:block;height:100%;width:0;background:var(--steel);transition:width .2s}
+#stage{font-size:.85rem;color:var(--ink2);margin-bottom:.75rem}
+#stage b{color:var(--ink);font-weight:600}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.75rem}
 .stat{background:var(--surface2);border:1px solid var(--hair);border-radius:8px;padding:.75rem}
 .stat .k{font-size:.75rem;color:var(--ink2)}
@@ -88,6 +93,8 @@ code{font-family:var(--mono);font-size:.85em}
 
 <div class="card" id="logcard">
   <h2 style="margin-top:0">Ход разбора</h2>
+  <div class="bar hidden" id="bar"><i></i></div>
+  <div id="stage" class="hidden"></div>
   <div id="log">Готовим окружение…</div>
 </div>
 
@@ -124,11 +131,16 @@ code{font-family:var(--mono);font-size:.85em}
 // База Pyodide. Переопределяется через ?pyodide=<url> — это нужно и для offline-развёртывания,
 // и для автотеста страницы, который поднимает локальную копию.
 const PARAMS = new URLSearchParams(location.search);
-const PYODIDE_BASE = PARAMS.get("pyodide") || "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
+// Абсолютным: база уезжает в воркер, а относительный путь там разрешался бы
+// от адреса worker.js, а не страницы.
+const PYODIDE_BASE = new URL(
+  PARAMS.get("pyodide") || "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/",
+  location.href,
+).href;
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
-let pyodide = null, ready = false, chosenFile = null;
+let ready = false, chosenFile = null, totalStages = 13, started = 0;
 
 function log(line) {
   logEl.textContent += (logEl.textContent ? "\n" : "") + line;
@@ -140,48 +152,44 @@ function fail(message) {
   box.classList.remove("hidden");
 }
 
-async function boot() {
-  try {
-    log("Загружаем Pyodide…");
-    const mod = await import(PYODIDE_BASE + "pyodide.mjs");
-    pyodide = await mod.loadPyodide({ indexURL: PYODIDE_BASE });
+// Конвейер живёт в воркере: на главном потоке Pyodide заморозил бы вкладку на
+// всё время разбора — семьдесят секунд на самой большой из калибровочных касс,
+// — и полоса хода не успела бы перерисоваться ни разу. См. web/worker.js.
+const worker = new Worker("worker.js", { type: "module" });
 
-    log("Ставим numpy, scipy, pydantic, pyyaml…");
-    await pyodide.loadPackage(["numpy", "scipy", "pydantic", "pyyaml", "micropip"]);
+function showStage(number, title) {
+  $("bar").classList.remove("hidden");
+  $("stage").classList.remove("hidden");
+  $("bar").firstElementChild.style.width = Math.round((number / totalStages) * 100) + "%";
+  const seconds = ((performance.now() - started) / 1000).toFixed(0);
+  $("stage").innerHTML = `Стадия ${number} из ${totalStages}: <b>${esc(title)}</b> · ${seconds} с`;
+}
 
-    // Все недостающие колёса лежат рядом со страницей: сайт не зависит ни от
-    // PyPI, ни от чужого CDN, и работает в закрытом контуре.
-    log("Ставим openpyxl, ruptures, cashforensics…");
-    const micropip = pyodide.pyimport("micropip");
-    const wheels = await (await fetch("wheels/index.json")).json();
-    // deps:false — порядок установки задан в index.json явно. Разрешение
-    // зависимостей по метаданным увело бы micropip в PyPI за rapidfuzz,
-    // которого под wasm не существует; см. web/wheel_index.py.
-    for (const name of wheels.install) {
-      // callKwargs — иначе объект уходит в позиционный `keep_going`, а не в `deps`,
-      // и micropip всё равно идёт в PyPI за rapidfuzz.
-      await micropip.install.callKwargs(new URL("wheels/" + name, location.href).href, { deps: false });
-    }
-
-    log("Кладём конфигурацию §6…");
-    pyodide.FS.mkdirTree("/config");
-    for (const name of ["default.yaml", "holidays_by.yaml"]) {
-      const text = await (await fetch("config/" + name)).text();
-      pyodide.FS.writeFile("/config/" + name, text);
-    }
-
-    const runner = await (await fetch("runner.py")).text();
-    pyodide.FS.writeFile("/runner.py", runner);
-    await pyodide.runPythonAsync("import sys; sys.path.insert(0, '/'); import runner");
-
+worker.onmessage = ({ data }) => {
+  if (data.type === "log") {
+    log(data.line);
+  } else if (data.type === "ready") {
+    totalStages = data.total;
     ready = true;
     log("Готово. Выберите выгрузку.");
     if (chosenFile) $("run").disabled = false;
-  } catch (error) {
-    fail("Не удалось подготовить окружение: " + error);
-    log("ОШИБКА: " + error);
+  } else if (data.type === "stage") {
+    showStage(data.number, data.title);
+  } else if (data.type === "result") {
+    finish(JSON.parse(data.payload));
+  } else if (data.type === "error") {
+    const prefix = data.phase === "boot" ? "Не удалось подготовить окружение: " : "Разбор не удался: ";
+    fail(prefix + data.message);
+    log("ОШИБКА: " + data.message);
+    $("bar").classList.add("hidden");
+    $("stage").classList.add("hidden");
+    $("run").disabled = !ready || !chosenFile;
   }
-}
+};
+worker.onerror = (event) => {
+  fail("Воркер не запустился: " + (event.message || event.type));
+  log("ОШИБКА: " + (event.message || event.type));
+};
 
 function money(value) {
   const n = Number(value);
@@ -254,32 +262,31 @@ async function analyze() {
   $("run").disabled = true;
   $("fail").classList.add("hidden");
   $("out").classList.add("hidden");
-  const started = performance.now();
-  try {
-    log("Читаем файл…");
-    const data = new Uint8Array(await chosenFile.arrayBuffer());
-    pyodide.globals.set("_name", chosenFile.name);
-    pyodide.globals.set("_data", data);
-    pyodide.globals.set("_target", $("target").value || "");
-    log("Запускаем конвейер §5 — двенадцать стадий…");
-    const proxy = await pyodide.runPythonAsync(
-      "import runner, json; json.dumps(runner.analyze_bytes(_name, bytes(_data), _target), ensure_ascii=False)"
-    );
-    const result = JSON.parse(proxy);
-    renderStats(result);
-    renderCausal(result.causal);
-    renderFindings(result.findings);
-    renderRecon(result.reconciliation);
-    renderDownloads(result.reports, result.pvz);
-    $("out").classList.remove("hidden");
-    log(`Готово за ${((performance.now() - started) / 1000).toFixed(1)} с.`);
-    window.__cashforensics_result = result;   // точка опоры автотеста страницы
-  } catch (error) {
-    fail("Разбор не удался: " + error);
-    log("ОШИБКА: " + error);
-  } finally {
-    $("run").disabled = !ready || !chosenFile;
-  }
+  started = performance.now();
+  log("Читаем файл…");
+  const buffer = await chosenFile.arrayBuffer();
+  log(`Запускаем конвейер §5 — ${totalStages} стадий…`);
+  showStage(0, "передаём выгрузку в воркер");
+  // Буфер передаётся, а не копируется: выгрузка на восемьдесят тысяч строк
+  // весит десятки мегабайт, и лишняя копия в главном потоке ни к чему.
+  worker.postMessage(
+    { type: "analyze", name: chosenFile.name, buffer, target: $("target").value || "" },
+    [buffer],
+  );
+}
+
+function finish(result) {
+  renderStats(result);
+  renderCausal(result.causal);
+  renderFindings(result.findings);
+  renderRecon(result.reconciliation);
+  renderDownloads(result.reports, result.pvz);
+  $("out").classList.remove("hidden");
+  $("bar").firstElementChild.style.width = "100%";
+  $("stage").classList.add("hidden");
+  log(`Готово за ${((performance.now() - started) / 1000).toFixed(1)} с.`);
+  $("run").disabled = !ready || !chosenFile;
+  window.__cashforensics_result = result;   // точка опоры автотеста страницы
 }
 
 function choose(file) {
@@ -296,7 +303,7 @@ $("drop").ondragleave = () => $("drop").classList.remove("over");
 $("drop").ondrop = (e) => { e.preventDefault(); $("drop").classList.remove("over"); choose(e.dataTransfer.files[0]); };
 $("run").onclick = analyze;
 
-boot();
+worker.postMessage({ type: "boot", pyodideBase: PYODIDE_BASE });
 </script>
 </body>
 </html>

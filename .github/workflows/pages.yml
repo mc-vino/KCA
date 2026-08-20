@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p site/wheels site/config
-          cp web/index.html web/runner.py site/
+          cp web/index.html web/worker.js web/runner.py site/
           cp web/wheels/*.whl site/wheels/
           cp config/default.yaml config/holidays_by.yaml site/config/
           uv build --wheel --out-dir site/wheels .

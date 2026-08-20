@@ -21,16 +21,26 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from cashforensics.cli import run_pipeline
+from cashforensics.cli import STAGES, run_pipeline
 from cashforensics.models import AnalysisResult, Config, load_config
 from cashforensics.report.excel import render_excel
 from cashforensics.report.html import render_html
 from cashforensics.report.json_out import render_json
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 WORK = Path("/work")
 """Рабочий каталог в памяти Pyodide."""
+
+TOTAL_STAGES = len(STAGES) + 1
+"""Стадии §5 плюс сборка отчётов §9 — знаменатель полосы хода."""
+
+
+def _silent(_number: int, _title: str) -> None:
+    """Индикатор хода по умолчанию — не делает ничего."""
 
 
 def _causal(result: AnalysisResult) -> list[dict[str, Any]]:
@@ -79,13 +89,21 @@ def _reconciliation(result: AnalysisResult) -> list[dict[str, Any]]:
     ]
 
 
-def analyze_bytes(name: str, data: bytes, target: str = "") -> dict[str, Any]:
+def analyze_bytes(
+    name: str,
+    data: bytes,
+    target: str = "",
+    on_stage: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
     """Разобрать выгрузку и вернуть сводку вместе с отчётами §9.
 
     Args:
         name: имя файла — попадает в метаданные отчёта (§12).
         data: содержимое ``.xlsx``.
         target: целевое сальдо ``T`` строкой; пусто — взять из конфига (§5.8.2).
+        on_stage: обратный вызов ``(номер, название)`` — стадии §5 и сборка
+            отчётов §9. Страница рисует по нему полосу хода: на Солигорске
+            разбор идёт больше минуты.
 
     Returns:
         Словарь для страницы: сводка, раскладка, находки, сверка и три отчёта
@@ -93,13 +111,15 @@ def analyze_bytes(name: str, data: bytes, target: str = "") -> dict[str, Any]:
         передать строку, чем буфер, а размер отчётов измеряется сотнями
         килобайт, не мегабайтами.
     """
+    stage = on_stage if on_stage is not None else _silent
     config = _config(target)
     WORK.mkdir(parents=True, exist_ok=True)
     register = WORK / name
     register.write_bytes(data)
 
-    result = run_pipeline(register, config)
+    result = run_pipeline(register, config, on_stage=stage)
 
+    stage(len(STAGES) + 1, "Сборка отчётов §9")
     excel = render_excel(result, WORK / "отчёт.xlsx")
     payload = render_json(result, WORK / "отчёт.json")
     page = render_html(result, WORK / "отчёт.html")
