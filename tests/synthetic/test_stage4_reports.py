@@ -28,7 +28,7 @@ import pytest
 from openpyxl import load_workbook
 from typer.testing import CliRunner
 
-from cashforensics.cli import app, run_pipeline
+from cashforensics.cli import STAGES, app, run_pipeline
 from cashforensics.models import Config, FindingCode, load_config
 from cashforensics.report.excel import SHEETS, render_excel
 from cashforensics.report.json_out import render_json
@@ -296,6 +296,41 @@ class TestDeterminism:
         first = [item.code for item in run_pipeline(register, config).findings]
         second = [item.code for item in run_pipeline(register, config).findings]
         assert first == second
+
+
+class TestStageProgress:
+    """Индикатор хода ``on_stage`` — страница рисует по нему полосу.
+
+    Разбор самой большой калибровочной кассы идёт больше минуты, и без
+    обратной связи страница неотличима от зависшей. Отсюда три требования, и
+    все три легко нарушить незаметно: пропущенный вызов оставит полосу
+    стоять, лишний — сдвинет её мимо конца, а вызов, влияющий на расчёт,
+    нарушит §13.5.
+    """
+
+    @staticmethod
+    def _record(register: Path, config: Config) -> list[tuple[int, str]]:
+        seen: list[tuple[int, str]] = []
+        run_pipeline(register, config, on_stage=lambda number, title: seen.append((number, title)))
+        return seen
+
+    def test_every_stage_reports_once_in_order(self, register: Path, config: Config) -> None:
+        assert self._record(register, config) == list(enumerate(STAGES, start=1))
+
+    def test_progress_does_not_change_the_result(
+        self,
+        register: Path,
+        config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """§13.5: наблюдение за конвейером не имеет права его менять."""
+        silent = run_pipeline(register, config)
+        watched = run_pipeline(register, config, on_stage=lambda _number, _title: None)
+        meta = watched.meta.model_copy(update={"run_timestamp": silent.meta.run_timestamp})
+        stamped = watched.model_copy(update={"meta": meta})
+        assert render_json(silent, tmp_path / "silent.json").read_bytes() == (
+            render_json(stamped, tmp_path / "watched.json").read_bytes()
+        )
 
 
 SUM_RANGE_RE = re.compile(r"^=SUM\(([A-Z]+)(\d+):[A-Z]+(\d+)\)$")
