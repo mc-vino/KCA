@@ -11,8 +11,12 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from cashforensics.balance import balance_trace
 from cashforensics.classify import BlockClassificationFailed, classify
@@ -31,7 +35,7 @@ from cashforensics.signatures import collect_signatures
 from cashforensics.timing import run_timing
 from cashforensics.validate import ValidationFailed, validate
 
-__all__ = ["analyze", "app", "batch", "explain", "main", "run_pipeline", "verify"]
+__all__ = ["STAGES", "analyze", "app", "batch", "explain", "main", "run_pipeline", "verify"]
 
 app = typer.Typer(
     name="cashforensics",
@@ -45,12 +49,39 @@ DEFAULT_CONFIG = Path("config/default.yaml")
 _ZERO = Decimal("0.00")
 
 
+def _silent(_number: int, _title: str) -> None:
+    """Индикатор хода по умолчанию — не делает ничего (CLI печатает сам)."""
+
+
+STAGES: tuple[str, ...] = (
+    "Чтение выгрузки",
+    "Нормализация",
+    "Проверка инвариантов",
+    "Классификация",
+    "Нейтрализация сторно",
+    "Сверка по категориям",
+    "Свёртка лага",
+    "Локализация",
+    "Прослеживание сальдо",
+    "Категорийная раскладка",
+    "Сигнатуры и ранжирование",
+    "Причинная раскладка",
+)
+"""Названия стадий §5 для индикатора хода — в порядке исполнения.
+
+Нужны только тому, кто ждёт: разбор Солигорска (82 611 строк, 108 локализаций
+с перестановочными тестами §7.3) идёт больше минуты, и страница без обратной
+связи неотличима от зависшей. На результат порядок и названия не влияют.
+"""
+
+
 def run_pipeline(
     path: Path,
     config: Config,
     *,
     collapse: bool = True,
     neutralize: bool = True,
+    on_stage: Callable[[int, str], None] | None = None,
 ) -> AnalysisResult:
     """Прогнать все 12 стадий конвейера §5.
 
@@ -66,23 +97,39 @@ def run_pipeline(
         config: конфигурация §6.
         collapse: ``False`` соответствует ``--no-collapse`` (§12).
         neutralize: ``False`` соответствует ``--no-reversal-neutralization``.
+        on_stage: необязательный обратный вызов ``(номер, название)`` перед
+            каждой стадией — индикатор хода для страницы. Ничего не считает и
+            на результат не влияет: детерминированность §13.5 сохраняется.
 
     Raises:
         ValidationFailed: нарушен жёсткий инвариант V1–V3 (§5.3).
         BlockClassificationFailed: time-fallback §3.3 не верифицирован.
     """
+    stage = on_stage if on_stage is not None else _silent
+
+    stage(1, STAGES[0])
     ingested = ingest(path, config)
+    stage(2, STAGES[1])
     normalized = normalize(ingested, config)
+    stage(3, STAGES[2])
     validation = validate(normalized, config)
+    stage(4, STAGES[3])
     classified = classify(normalized, config)
+    stage(5, STAGES[4])
     reversals = neutralize_reversals(classified, config, enabled=neutralize)
+    stage(6, STAGES[5])
     reconciliation = reconcile(classified, reversals, config)
+    stage(7, STAGES[6])
     timing = run_timing(reconciliation, config, enabled=collapse)
+    stage(8, STAGES[7])
     localizations = localize(classified, reversals, timing, config, reconciliation)
+    stage(9, STAGES[8])
     balance = balance_trace(classified, normalized.totals.opening, config)
+    stage(10, STAGES[9])
     # Категорийная раскладка §5.10 находок не требует — только тождество §5.6.
     waterfall = decompose(reconciliation, balance, classified, (), localizations)
 
+    stage(11, STAGES[10])
     benchmark = sum(
         (entry.debit for entry in classified.ledger),
         _ZERO,
@@ -106,6 +153,7 @@ def run_pipeline(
         config,
     )
 
+    stage(12, STAGES[11])
     # Причинная форма §5.10 строится ПОСЛЕ ранжирования: ей нужен полный список
     # находок §8, а не только сторно §5.5. Пока раскладка собиралась до сборки
     # находок, задвоенный ПКО, срез периода, неизвестные счета и дисбаланс логов

@@ -33,7 +33,6 @@ from datetime import date
 from decimal import Decimal
 
 import numpy as np
-from rapidfuzz.distance import JaroWinkler
 from scipy.optimize import linear_sum_assignment
 
 from cashforensics.models import (
@@ -138,9 +137,22 @@ def name_similarity(left: str, right: str) -> float:
     Используется только как компонент стоимости сопоставления; порог —
     ``statistics.fuzzy_name_threshold`` (§6). Пустое имя (вариант C, §3.3) даёт
     0: сравнивать не с чем, и притворяться, что совпадение полное, нельзя.
+
+    Импорт ``rapidfuzz`` — **ленивый**, и это не оптимизация запуска. Проход 2
+    §5.9.2 (венгерский алгоритм) назван там опциональным и в конвейере не
+    включён: единственный вызов :func:`name_similarity` живёт в
+    :func:`hungarian_match`, а тот не вызывается ниоткуда. Модульный импорт
+    делал бинарный ``rapidfuzz`` обязательным для всего пакета — включая сборку
+    под wasm, где колеса для него нет, — ради функции, которая не исполняется.
+
+    Заглушки здесь быть не должно: если проход 2 когда-нибудь включат, а
+    библиотеки не окажется, правильный ответ — явная ошибка импорта, а не
+    правдоподобное число (§0.3).
     """
     if not left or not right:
         return 0.0
+    from rapidfuzz.distance import JaroWinkler  # noqa: PLC0415  # см. докстринг
+
     return float(JaroWinkler.similarity(left, right))
 
 

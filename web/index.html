@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cashforensics · форензик-анализ кассы ПВЗ</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2334424A'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='19' font-weight='700' text-anchor='middle' fill='%23EAE3D5'%3E%E2%82%BD%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* Палитра — та же, что в отчёте §9.1 (report/excel.py COLORS). */
+:root{
+  --paper:#EAE3D5;--surface:#F6F2E9;--surface2:#FBF8F1;--ink:#1A1813;--ink2:#6B655A;
+  --hair:#D6CDBC;--red:#B23A2E;--amber:#A9781B;--lime:#5F7D17;--steel:#34424A;
+  --redbg:#F6E2DD;--amberbg:#F4E9D2;--limebg:#E7ECD4;--steelbg:#E2E7E6;--white:#FFF;
+  --display:'Space Grotesk',sans-serif;--body:'Golos Text',sans-serif;--mono:'JetBrains Mono',monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);line-height:1.55}
+.wrap{max-width:72rem;margin:0 auto;padding:2rem 1.25rem 4rem}
+h1{font-family:var(--display);font-size:1.75rem;margin:0 0 .25rem}
+h2{font-family:var(--display);font-size:1.15rem;margin:2rem 0 .75rem;color:var(--steel)}
+.lede{color:var(--ink2);margin:0 0 1.5rem;max-width:52rem}
+.card{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:1.25rem;margin-bottom:1.25rem}
+.privacy{background:var(--limebg);border-color:#c3d29a}
+.drop{background:var(--surface2);border:2px dashed var(--hair);border-radius:10px;padding:2.5rem 1.25rem;text-align:center;cursor:pointer;transition:.15s}
+.drop:hover,.drop.over{border-color:var(--steel);background:var(--white)}
+.drop strong{display:block;font-size:1.05rem;margin-bottom:.35rem}
+.row{display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-top:1rem}
+label{display:block;font-size:.85rem;color:var(--ink2);margin-bottom:.25rem}
+input[type=text]{font-family:var(--mono);padding:.5rem .6rem;border:1px solid var(--hair);border-radius:6px;background:var(--white);color:var(--ink);width:12rem}
+button{font-family:var(--body);font-weight:600;padding:.55rem 1.1rem;border:1px solid var(--steel);border-radius:6px;background:var(--steel);color:var(--white);cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+button.ghost{background:var(--white);color:var(--steel)}
+#log{font-family:var(--mono);font-size:.8rem;white-space:pre-wrap;max-height:15rem;overflow:auto;color:var(--ink2)}
+.bar{height:.5rem;background:var(--surface2);border:1px solid var(--hair);border-radius:99px;overflow:hidden;margin:.75rem 0 .4rem}
+.bar > i{display:block;height:100%;width:0;background:var(--steel);transition:width .2s}
+#stage{font-size:.85rem;color:var(--ink2);margin-bottom:.75rem}
+#stage b{color:var(--ink);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.75rem}
+.stat{background:var(--surface2);border:1px solid var(--hair);border-radius:8px;padding:.75rem}
+.stat .k{font-size:.75rem;color:var(--ink2)}
+.stat .v{font-family:var(--mono);font-size:1.1rem;font-weight:500;margin-top:.15rem}
+table{border-collapse:collapse;width:100%;font-size:.87rem}
+th,td{border-bottom:1px solid var(--hair);padding:.4rem .55rem;text-align:left;vertical-align:top}
+th{background:var(--surface2);font-weight:600}
+td.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+td.lvl{font-family:var(--mono);font-size:.78rem;color:var(--ink2);white-space:nowrap}
+tr.ОШИБКА td{background:var(--redbg)} tr.ПРОВЕРИТЬ td{background:var(--amberbg)}
+tr.НОРМА td{background:var(--limebg)} tr.residual td{background:var(--amberbg);font-style:italic}
+tr.structure td{background:var(--steelbg)}
+.scroll{overflow-x:auto}
+.hidden{display:none}
+/* Поле файла прячем визуально, но оставляем в дереве доступности: display:none
+   убирает его и от скринридера, и от автотеста страницы. */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.err{background:var(--redbg);border-color:#d9a79e}
+footer{color:var(--ink2);font-size:.82rem;margin-top:2.5rem;border-top:1px solid var(--hair);padding-top:1rem}
+code{font-family:var(--mono);font-size:.85em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>cashforensics</h1>
+<p class="lede">Форензик-анализ операционной кассы ПВЗ по выгрузке 1С «Карточка счёта 50.2».
+Отвечает на один вопрос: <strong>из-за каких конкретно документов сальдо на конец периода
+отличается от целевого</strong> — и раскладывает отклонение так, чтобы раскладка сходилась без остатка.</p>
+
+<div class="card privacy">
+  <strong>Файл не покидает ваш браузер.</strong> Анализ идёт локально: Python-пакет
+  <code>cashforensics</code> исполняется прямо на этой странице через Pyodide (WebAssembly).
+  Ни выгрузка, ни отчёты никуда не отправляются — это обязательное свойство, потому что блок
+  РКО содержит ФИО получателей.
+</div>
+
+<div class="card">
+  <div class="drop" id="drop">
+    <strong>Перетащите сюда выгрузку <code>.xlsx</code></strong>
+    <span>или нажмите, чтобы выбрать файл</span>
+    <input type="file" id="file" accept=".xlsx" class="sr-only">
+  </div>
+  <div class="row">
+    <div>
+      <label for="target">Целевое сальдо T (§5.8.2)</label>
+      <input type="text" id="target" placeholder="0.00" inputmode="decimal">
+    </div>
+    <button id="run" disabled>Разобрать</button>
+    <span id="chosen" style="color:var(--ink2)"></span>
+  </div>
+</div>
+
+<div class="card" id="logcard">
+  <h2 style="margin-top:0">Ход разбора</h2>
+  <div class="bar hidden" id="bar"><i></i></div>
+  <div id="stage" class="hidden"></div>
+  <div id="log">Готовим окружение…</div>
+</div>
+
+<div id="fail" class="card err hidden"></div>
+
+<div id="out" class="hidden">
+  <h2>Итог</h2>
+  <div class="grid" id="stats"></div>
+
+  <h2>Причина отклонения сальдо — §5.10</h2>
+  <p class="lede">Колонка «уровень» отвечает, чем строка доказана: документом, днём, категорией
+  или слагаемым тождества §5.10. §7.4 запрещает спускаться ниже дневного агрегата продаж —
+  величина при этом остаётся точной.</p>
+  <div class="scroll"><table id="causal"></table></div>
+
+  <h2>Находки — §8, в порядке ранжирования §5.11</h2>
+  <div class="scroll"><table id="findings"></table></div>
+
+  <h2>Сверка по категориям — §5.6</h2>
+  <div class="scroll"><table id="recon"></table></div>
+
+  <h2>Отчёты §9</h2>
+  <div class="row" id="downloads"></div>
+</div>
+
+<footer>
+  Инструмент не квалифицирует находки как хищение или мошенничество: умысел из данных не выводится
+  (§1.2, §13.10). Формулировки — «расхождение», «требует проверки», «сигнатура», «не локализовано».
+  <br>Реализация по <code>ТЗ_кассовый_форензик_анализатор.md</code> версии 1.0.
+</footer>
+</div>
+
+<script>
+// База Pyodide. Переопределяется через ?pyodide=<url> — это нужно и для offline-развёртывания,
+// и для автотеста страницы, который поднимает локальную копию.
+const PARAMS = new URLSearchParams(location.search);
+// Абсолютным: база уезжает в воркер, а относительный путь там разрешался бы
+// от адреса worker.js, а не страницы.
+const PYODIDE_BASE = new URL(
+  PARAMS.get("pyodide") || "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/",
+  location.href,
+).href;
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+let ready = false, chosenFile = null, totalStages = 13, started = 0;
+
+function log(line) {
+  logEl.textContent += (logEl.textContent ? "\n" : "") + line;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function fail(message) {
+  const box = $("fail");
+  box.textContent = message;
+  box.classList.remove("hidden");
+}
+
+// Конвейер живёт в воркере: на главном потоке Pyodide заморозил бы вкладку на
+// всё время разбора — семьдесят секунд на самой большой из калибровочных касс,
+// — и полоса хода не успела бы перерисоваться ни разу. См. web/worker.js.
+const worker = new Worker("worker.js");
+
+function showStage(number, title) {
+  $("bar").classList.remove("hidden");
+  $("stage").classList.remove("hidden");
+  $("bar").firstElementChild.style.width = Math.round((number / totalStages) * 100) + "%";
+  const seconds = ((performance.now() - started) / 1000).toFixed(0);
+  $("stage").innerHTML = `Стадия ${number} из ${totalStages}: <b>${esc(title)}</b> · ${seconds} с`;
+}
+
+worker.onmessage = ({ data }) => {
+  if (data.type === "log") {
+    log(data.line);
+  } else if (data.type === "ready") {
+    totalStages = data.total;
+    ready = true;
+    log("Готово. Выберите выгрузку.");
+    if (chosenFile) $("run").disabled = false;
+  } else if (data.type === "stage") {
+    showStage(data.number, data.title);
+  } else if (data.type === "result") {
+    finish(JSON.parse(data.payload));
+  } else if (data.type === "error") {
+    const prefix = data.phase === "boot" ? "Не удалось подготовить окружение: " : "Разбор не удался: ";
+    fail(prefix + data.message);
+    log("ОШИБКА: " + data.message);
+    $("bar").classList.add("hidden");
+    $("stage").classList.add("hidden");
+    $("run").disabled = !ready || !chosenFile;
+  }
+};
+worker.onerror = (event) => {
+  fail("Воркер не запустился: " + (event.message || event.type));
+  log("ОШИБКА: " + (event.message || event.type));
+};
+
+function money(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value;
+}
+
+function renderStats(r) {
+  const cells = [
+    ["ПВЗ", r.pvz], ["Сальдо на конец", money(r.closing)], ["Целевое T", money(r.target)],
+    ["Отклонение", money(r.deviation)], ["Несведённый остаток", money(r.unresolved)],
+    ["Находок", r.findings_total], ["Сигнатур", r.signatures_total],
+    ["Локализовано", r.localized + " из " + r.localizations_total],
+  ];
+  $("stats").innerHTML = cells
+    .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+    .join("");
+}
+
+function renderCausal(rows) {
+  const head = "<tr><th>Сумма</th><th>Уровень</th><th>Причина</th><th>Документы</th></tr>";
+  $("causal").innerHTML = head + rows.map((l) => {
+    const cls = l.residual ? "residual" : (l.structure ? "structure" : "");
+    return `<tr class="${cls}"><td class="num">${money(l.amount)}</td><td class="lvl">${l.level}</td><td>${esc(l.title)}</td><td class="lvl">${esc(l.docs)}</td></tr>`;
+  }).join("");
+}
+
+function renderFindings(rows) {
+  const head = "<tr><th>Код</th><th>Уровень</th><th>Дата</th><th>Сумма</th><th>На сальдо</th><th>Объяснение</th></tr>";
+  $("findings").innerHTML = head + rows.map((f) =>
+    `<tr class="${f.severity}"><td class="lvl">${f.code}</td><td class="lvl">${f.severity}</td><td class="lvl">${f.date}</td><td class="num">${money(f.amount)}</td><td class="num">${money(f.impact)}</td><td>${esc(f.explanation)}</td></tr>`
+  ).join("");
+}
+
+function renderRecon(rows) {
+  const head = "<tr><th>Категория</th><th>1С</th><th>Опер-лог</th><th>Нетто</th><th>ratio</th><th>Верифицируется</th><th>Вне периода</th></tr>";
+  $("recon").innerHTML = head + rows.map((c) =>
+    `<tr><td>${c.category}</td><td class="num">${money(c.ledger)}</td><td class="num">${money(c.ops)}</td><td class="num">${money(c.net)}</td><td class="num">${c.ratio}</td><td>${c.verifiable ? "да" : "нет — блока лога нет"}</td><td class="num">${money(c.outside)}</td></tr>`
+  ).join("");
+}
+
+function esc(value) {
+  const d = document.createElement("div");
+  d.textContent = value == null ? "" : value;
+  return d.innerHTML;
+}
+
+function renderDownloads(reports, pvz) {
+  const kinds = [["xlsx", "Excel §9.1", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+                 ["json", "JSON §9.2", "application/json"],
+                 ["html", "HTML §9.3", "text/html"]];
+  $("downloads").innerHTML = "";
+  for (const [kind, label, mime] of kinds) {
+    const button = document.createElement("button");
+    button.className = "ghost";
+    button.textContent = "Скачать " + label;
+    button.onclick = () => {
+      const bytes = Uint8Array.from(atob(reports[kind]), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = pvz + "." + kind;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    $("downloads").appendChild(button);
+  }
+}
+
+async function analyze() {
+  $("run").disabled = true;
+  $("fail").classList.add("hidden");
+  $("out").classList.add("hidden");
+  started = performance.now();
+  log("Читаем файл…");
+  const buffer = await chosenFile.arrayBuffer();
+  log(`Запускаем конвейер §5 — ${totalStages} стадий…`);
+  showStage(0, "передаём выгрузку в воркер");
+  // Буфер передаётся, а не копируется: выгрузка на восемьдесят тысяч строк
+  // весит десятки мегабайт, и лишняя копия в главном потоке ни к чему.
+  worker.postMessage(
+    { type: "analyze", name: chosenFile.name, buffer, target: $("target").value || "" },
+    [buffer],
+  );
+}
+
+function finish(result) {
+  renderStats(result);
+  renderCausal(result.causal);
+  renderFindings(result.findings);
+  renderRecon(result.reconciliation);
+  renderDownloads(result.reports, result.pvz);
+  $("out").classList.remove("hidden");
+  $("bar").firstElementChild.style.width = "100%";
+  $("stage").classList.add("hidden");
+  log(`Готово за ${((performance.now() - started) / 1000).toFixed(1)} с.`);
+  $("run").disabled = !ready || !chosenFile;
+  window.__cashforensics_result = result;   // точка опоры автотеста страницы
+}
+
+function choose(file) {
+  if (!file) return;
+  chosenFile = file;
+  $("chosen").textContent = file.name;
+  $("run").disabled = !ready;
+}
+
+$("drop").onclick = () => $("file").click();
+$("file").onchange = (e) => choose(e.target.files[0]);
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => { e.preventDefault(); $("drop").classList.remove("over"); choose(e.dataTransfer.files[0]); };
+$("run").onclick = analyze;
+
+worker.postMessage({ type: "boot", pyodideBase: PYODIDE_BASE });
+</script>
+</body>
+</html>
