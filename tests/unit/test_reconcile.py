@@ -23,7 +23,9 @@ from cashforensics.reconcile import (
     daily_ledger_series,
     daily_ops_series,
     log_imbalance,
+    outside_ledger_period,
     reconcile,
+    within_ledger_period,
 )
 from tests.unit.test_classify import ledger_entry, ops_entry
 
@@ -319,3 +321,55 @@ class TestLogImbalance:
         )
 
         assert log_imbalance(ops) == ZERO
+
+
+class TestLedgerPeriodClip:
+    """§5.6, §5.3: сверять можно только там, где есть обе стороны."""
+
+    @staticmethod
+    def _register() -> tuple[tuple[LedgerEntry, ...], tuple[OpsEntry, ...]]:
+        """Карточка до 02.02, лог до 05.02 — типовой срез выгрузки."""
+        ledger = (
+            _income(1, date(2024, 2, 1), Decimal("300.00")),
+            _refund_posting(2, date(2024, 2, 2), Decimal("100.00")),
+        )
+        ops = (
+            _ops(10, datetime(2024, 2, 2, 12, 0), Decimal("100.00"), OpsClass.REFUND),
+            _ops(11, datetime(2024, 2, 5, 12, 0), Decimal("777.00"), OpsClass.REFUND),
+        )
+        return (ledger, ops)
+
+    def test_records_past_the_last_posting_are_dropped(self) -> None:
+        """За последней проводкой карточки отсутствует вся вторая сторона.
+
+        `Кса_норма` — эталон §11.3 «без ошибок» — имеет карточку до 30.04.2026 и
+        лог до 02.06.2026, и §5.6 сравнивала пять недель 1С против десяти недель
+        лога: инкассация 269 243,54 против 587 835,72 при отклонении сальдо
+        +10 632,25.
+        """
+        ledger, ops = self._register()
+
+        inside = within_ledger_period(ops, ledger)
+
+        assert [entry.row for entry in inside] == [10]
+
+    def test_dropped_amount_is_reported_not_swallowed(self) -> None:
+        """§5: тихих пропусков нет — величина идёт в оговорки §16."""
+        ledger, ops = self._register()
+
+        assert outside_ledger_period(ops, ledger, Category.REFUND) == Decimal("777.00")
+
+    def test_clip_makes_the_category_net_meaningful(self, config: Config) -> None:
+        """Со срезом нетто категории перестаёт быть артефактом выгрузки."""
+        ledger, ops = self._register()
+
+        recon = reconcile(_classified(ledger, ops), _no_reversals(), config)
+
+        assert recon[Category.REFUND].net == ZERO
+        assert recon[Category.REFUND].outside_period == Decimal("777.00")
+
+    def test_empty_ledger_clips_nothing(self) -> None:
+        """Без проводок границы нет — отбрасывать по ней нельзя."""
+        _, ops = self._register()
+
+        assert len(within_ledger_period(ops, ())) == len(ops)

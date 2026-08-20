@@ -148,6 +148,17 @@ def render_section_limitations(result: AnalysisResult) -> str:
     Включает границы доказуемости §1.3 и развилку «какая из систем права».
     """
     refused = sum(1 for item in result.localizations if item.code is None)
+    clipped = "".join(
+        f"<li>Категория «{category.value}»: {recon.outside_period} опер-лога лежит за "
+        "последней проводкой карточки 1С и в сверку не вошло — сравнивать эти записи не "
+        "с чем (§5.3). Это срез выгрузки, а не непроведённые операции; проверяется "
+        "расширением периода выгрузки 1С.</li>"
+        for category, recon in sorted(
+            result.reconciliation.items(),
+            key=lambda item: item[0].value,
+        )
+        if recon.outside_period
+    )
     unverifiable = "".join(
         f"<li>Категория «{category.value}» не верифицируется: блока опер-лога для неё "
         f"в выгрузке нет (§3.3). Обороты 1С по ней — {recon.acc_total} — приняты как "
@@ -161,6 +172,7 @@ def render_section_limitations(result: AnalysisResult) -> str:
     return (
         "<h2>Что проверить и чего инструмент не знает</h2>"
         "<div class='caveat'><ul>"
+        f"{clipped}"
         f"{unverifiable}"
         "<li>Инструмент не может сказать, какая из двух систем права: 1С или опер-лог. "
         "Если суммы в проблемных ордерах подтвердятся подписями клиентов, ошибка "

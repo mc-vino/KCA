@@ -1,0 +1,57 @@
+name: Проверки
+
+# Тот же набор, что CLAUDE.md требует прогонять перед коммитом: линтер,
+# форматирование, типы, тесты. Без него ничто не удерживает инварианты §5–§13 —
+# а их в проекте плотная сеть, и «оптимизировать обратно» ловушку §7 CLAUDE.md
+# легко именно потому, что тест на неё выглядит избыточным.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Установить Python
+        run: uv python install
+
+      - name: Синхронизировать зависимости
+        run: uv sync --frozen
+
+      # §13.6 требует настоящего пересчёта формул. Нужен именно
+      # `libreoffice-calc`: одного `libreoffice-core` мало — без фильтра таблиц
+      # не открывается ни одна книга, включая тривиальную из трёх ячеек, и тест
+      # пропускается, приняв сломанное окружение за отсутствие пакета.
+      - name: Установить LibreOffice Calc для пересчёта §13.6
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libreoffice-calc
+
+      - name: Линтер
+        run: uv run ruff check .
+
+      - name: Форматирование
+        run: uv run ruff format --check .
+
+      - name: Типы
+        run: uv run mypy
+
+      # Регрессия §11.3 требует калибровочных выгрузок. Обезличенные лежат в
+      # `tests/regression/fixtures/`; если их нет, соответствующие тесты
+      # пропускаются с явной причиной — молчаливым проход не бывает, и `-ra`
+      # показывает каждый пропуск в сводке.
+      - name: Тесты
+        run: uv run pytest -ra

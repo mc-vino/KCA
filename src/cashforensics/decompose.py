@@ -34,7 +34,7 @@ from cashforensics.models import (
     LocalizationStatus,
     Waterfall,
 )
-from cashforensics.reconcile import log_imbalance
+from cashforensics.reconcile import log_imbalance, within_ledger_period
 
 __all__ = [
     "CAUSAL_CONFIDENCE_FLOOR",
@@ -89,7 +89,9 @@ def build_waterfall(
     # Единственный источник формулы — §5.6; собственной копии здесь быть не
     # должно: при расхождении реализаций тождество §5.10 перестаёт сходиться
     # ровно на сумму служебных РКО.
-    imbalance = log_imbalance(classified.ops)
+    # Тот же срез периода, что и в §5.6: логовые слагаемые тождества обязаны
+    # сокращаться, а для этого обе стороны должны считаться по одному ряду.
+    imbalance = log_imbalance(within_ledger_period(classified.ops, classified.ledger))
 
     components = (
         balance.opening + income - collection - refund + (other_debit - other_credit) + imbalance
