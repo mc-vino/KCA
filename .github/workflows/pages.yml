@@ -46,6 +46,10 @@ jobs:
           cp config/default.yaml config/holidays_by.yaml site/config/
           uv build --wheel --out-dir site/wheels .
           uv run python web/wheel_index.py site/wheels
+          # Среда исполнения едет вместе с сайтом: см. web/vendor_pyodide.py.
+          # Скачивание с CDN — зависимость сборки, а не страницы, и каждый файл
+          # проверяется по контрольной сумме.
+          uv run python web/vendor_pyodide.py site/pyodide
 
       # Данные кассы обрабатываются в браузере и никуда не уходят, но сам
       # репозиторий публичный — выгрузок и отчётов на сайте быть не должно.
