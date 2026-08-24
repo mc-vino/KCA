@@ -5,16 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>cashforensics · форензик-анализ кассы ПВЗ</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2334424A'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='19' font-weight='700' text-anchor='middle' fill='%23EAE3D5'%3E%E2%82%BD%3C/text%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<!-- Веб-шрифтов нет намеренно. Страница обещает, что данные кассы её не
+     покидают, и запрос к чужому шрифтовому серверу при каждом открытии этому
+     обещанию противоречит: сам факт обращения к инструменту уходит наружу.
+     Плюс в закрытом контуре такой запрос всё равно не проходит. Системные
+     стеки ниже дают то же начертание без единого внешнего обращения. -->
 <style>
 /* Палитра — та же, что в отчёте §9.1 (report/excel.py COLORS). */
 :root{
   --paper:#EAE3D5;--surface:#F6F2E9;--surface2:#FBF8F1;--ink:#1A1813;--ink2:#6B655A;
   --hair:#D6CDBC;--red:#B23A2E;--amber:#A9781B;--lime:#5F7D17;--steel:#34424A;
   --redbg:#F6E2DD;--amberbg:#F4E9D2;--limebg:#E7ECD4;--steelbg:#E2E7E6;--white:#FFF;
-  --display:'Space Grotesk',sans-serif;--body:'Golos Text',sans-serif;--mono:'JetBrains Mono',monospace;
+  --display:'Segoe UI Semibold','Noto Sans',system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif;
+  --body:system-ui,-apple-system,'Segoe UI','Noto Sans',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --mono:ui-monospace,'SF Mono','Cascadia Mono','Segoe UI Mono','Roboto Mono','DejaVu Sans Mono',monospace;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--body);line-height:1.55}
@@ -128,15 +132,15 @@ code{font-family:var(--mono);font-size:.85em}
 </div>
 
 <script>
-// База Pyodide. Переопределяется через ?pyodide=<url> — это нужно и для offline-развёртывания,
-// и для автотеста страницы, который поднимает локальную копию.
+// База Pyodide. По умолчанию — рядом со страницей: среда исполнения едет вместе
+// с сайтом, а не тянется с чужого CDN. Причины в web/vendor_pyodide.py; короткая
+// из них — корпоративные сети режут CDN чаще, чем собственный домен, а страница
+// без Pyodide не показывает ошибку, она просто не оживает.
+// Переопределяется через ?pyodide=<url>, если среду держат в другом месте.
 const PARAMS = new URLSearchParams(location.search);
 // Абсолютным: база уезжает в воркер, а относительный путь там разрешался бы
 // от адреса worker.js, а не страницы.
-const PYODIDE_BASE = new URL(
-  PARAMS.get("pyodide") || "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/",
-  location.href,
-).href;
+const PYODIDE_BASE = new URL(PARAMS.get("pyodide") || "pyodide/", location.href).href;
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");

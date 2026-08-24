@@ -23,14 +23,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # enablement:true переводит Pages со сборки из ветки на сборку из
-      # Actions. До этого источником был корень `main`, и по адресу висел
-      # старый корневой index.html — переписанный на JS конвейер, считавший
-      # деньги во float и гнавший subset-sum без гейтов §7.3. Без этого шага
-      # `deploy-pages` упал бы, а сайт остался бы прежним.
       - uses: actions/configure-pages@v5
         with:
           enablement: true
+
+      # `configure-pages` включает Pages, если те выключены, но у уже
+      # настроенного сайта источник не меняет — и делает это молча. Так и
+      # вышло: Pages собирались из корня `main`, обе сборки отработали
+      # «успешно», а в эфире осталась ветка. Пока там лежал корневой
+      # index.html, публиковался он; после его удаления Jekyll стал отдавать
+      # README.md. Артефакт при этом собирался правильный, и ничто не
+      # сигналило, что его никто не публикует.
+      #
+      # Здесь этот случай становится громким. Источник — настройка
+      # репозитория, из workflow её не переключить; поэтому проверка не чинит,
+      # а останавливает с указанием, что именно нажать.
+      - name: Проверить, что Pages собираются из Actions, а не из ветки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_type=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .build_type)
+          echo "источник Pages: ${build_type}"
+          if [ "${build_type}" != "workflow" ]; then
+            echo "::error::Pages собираются из ветки (build_type=${build_type}), и опубликован будет не этот артефакт. Settings → Pages → Build and deployment → Source: GitHub Actions." >&2
+            exit 1
+          fi
 
       - name: Установить uv
         uses: astral-sh/setup-uv@v5
@@ -46,6 +64,10 @@ jobs:
           cp config/default.yaml config/holidays_by.yaml site/config/
           uv build --wheel --out-dir site/wheels .
           uv run python web/wheel_index.py site/wheels
+          # Среда исполнения едет вместе с сайтом: см. web/vendor_pyodide.py.
+          # Скачивание с CDN — зависимость сборки, а не страницы, и каждый файл
+          # проверяется по контрольной сумме.
+          uv run python web/vendor_pyodide.py site/pyodide
 
       # Данные кассы обрабатываются в браузере и никуда не уходят, но сам
       # репозиторий публичный — выгрузок и отчётов на сайте быть не должно.
